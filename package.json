@@ -1,0 +1,54 @@
+{
+  "name": "@soledgic/sdk",
+  "version": "0.4.1",
+  "description": "Wallet-first payment infrastructure API for marketplaces, creator platforms, and closed-loop app economies",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/soledgic/sdk-typescript.git"
+  },
+  "homepage": "https://soledgic.com/docs/sdks",
+  "bugs": {
+    "url": "https://soledgic.com/support"
+  },
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
+    "test": "vitest run",
+    "audit:package": "node ../../scripts/audit-sdk-package.mjs",
+    "prepublishOnly": "npm run build && npm run audit:package"
+  },
+  "keywords": [
+    "accounting",
+    "ledger",
+    "double-entry",
+    "treasury",
+    "wallets",
+    "marketplace",
+    "fintech"
+  ],
+  "author": "Soledgic",
+  "license": "MIT",
+  "devDependencies": {
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6"
+  }
+}
