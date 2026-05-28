@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { Soledgic, SoledgicError, ValidationError, AuthenticationError, NotFoundError, ConflictError, mapWebhookEndpoint, mapWebhookDelivery, timingSafeEqual, webhookPayloadToString, isArrayBufferView, parseWebhookSignatureHeader, parseWebhookEvent, hmacHex, verifyWebhookSignature, resolveWebhookEndpointUrl, normalizeBaseUrl, SOLEDGIC_SANDBOX_WEBHOOK_EVENTS, buildSandboxRunMetadata, assertSandboxCheckoutCompleted, buildSandboxScenarioPayload, buildTestWebhook } from './index'
 
 const BASE_URL = 'https://test.supabase.co/functions/v1'
-const API_KEY = 'test_api_key_for_unit_tests'
+const API_KEY = 'slk_test_examplekey000000'
 
 function mockFetch(body: any, status = 200, contentType = 'application/json') {
   return vi.fn().mockResolvedValue({
@@ -44,6 +44,13 @@ describe('Soledgic SDK', () => {
 
   it('throws if apiKey is missing', () => {
     expect(() => new Soledgic({ apiKey: '', baseUrl: BASE_URL })).toThrow('apiKey is required')
+  })
+
+  it('throws a doorway error if apiKey is not a usable string', () => {
+    expect(() => new Soledgic({ apiKey: 12345 as any, baseUrl: BASE_URL })).toThrow('apiKey is required')
+    expect(() => new Soledgic({ apiKey: {} as any, baseUrl: BASE_URL })).toThrow('apiKey is required')
+    expect(() => new Soledgic({ apiKey: 'short', baseUrl: BASE_URL })).toThrow('slk_test_')
+    expect(() => new Soledgic({ apiKey: 'slk_test_sdk_install_smoke', baseUrl: BASE_URL })).toThrow('slk_test_')
   })
 
   it('defaults to the public API base URL when baseUrl is missing', async () => {
@@ -3994,13 +4001,16 @@ describe('Soledgic SDK', () => {
     it('createParticipant maps nested participant with tax_info', async () => {
       const fn = mockFetch({
         success: true,
-        participant: { id: 'c1', account_id: 'acct_1', display_name: 'Jane', email: 'j@test.com', default_split_percent: 80, payout_preferences: { schedule: 'weekly' }, created_at: '2026-01-01' },
+        participant: { id: 'c1', account_id: 'acct_1', created: false, identity_link_id: 'link_1', identity_link_status: 'pending', display_name: 'Jane', email: 'j@test.com', default_split_percent: 80, payout_preferences: { schedule: 'weekly' }, created_at: '2026-01-01' },
       })
       const sdk = createClient(fn)
       const result = await sdk.createParticipant({ participantId: 'c1' })
 
       expect(result.participant.id).toBe('c1')
       expect(result.participant.accountId).toBe('acct_1')
+      expect(result.participant.created).toBe(false)
+      expect(result.participant.identityLinkId).toBe('link_1')
+      expect(result.participant.identityLinkStatus).toBe('pending')
       expect(result.participant.displayName).toBe('Jane')
       expect(result.participant.email).toBe('j@test.com')
       expect(result.participant.defaultSplitPercent).toBe(80)

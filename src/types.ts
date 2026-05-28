@@ -5,7 +5,7 @@
 
 export interface SoledgicConfig {
   apiKey: string
-  /** API base URL. Defaults to https://api.soledgic.com/v1. */
+  /** API base URL. Defaults to Soledgic's public v1 API endpoint. */
   baseUrl?: string
   /** Request timeout in milliseconds. Default: 30000 (30s). */
   timeout?: number
@@ -1287,7 +1287,10 @@ export interface CreateParticipantResponse {
   participant: {
     id: string
     accountId: string
+    created: boolean
     linkedUserId: string | null
+    identityLinkId: string | null
+    identityLinkStatus: 'active' | 'pending' | null
     displayName: string | null
     email: string | null
     defaultSplitPercent: number

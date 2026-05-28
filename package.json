@@ -1,10 +1,13 @@
 {
   "name": "@soledgic/sdk",
-  "version": "0.4.1",
-  "description": "Wallet-first payment infrastructure API for marketplaces, creator platforms, and closed-loop app economies",
+  "version": "0.5.2",
+  "description": "Platform payment infrastructure SDK for creator economy platforms — live ledger layer for payments, wallets, revenue splits, payouts, refunds, and webhooks",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
+  "bin": {
+    "soledgic": "dist/cli.js"
+  },
   "sideEffects": false,
   "exports": {
     ".": {
@@ -29,24 +32,37 @@
     "url": "https://soledgic.com/support"
   },
   "scripts": {
-    "build": "tsup src/index.ts --format cjs,esm --dts",
-    "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
+    "build": "tsup src/index.ts src/cli.ts --format cjs,esm --dts && chmod +x dist/cli.js",
+    "dev": "tsup src/index.ts src/cli.ts --format cjs,esm --dts --watch",
     "test": "vitest run",
-    "audit:package": "node ../../scripts/audit-sdk-package.mjs",
+    "audit:package": "node scripts/audit-package.mjs",
     "prepublishOnly": "npm run build && npm run audit:package"
   },
   "keywords": [
-    "accounting",
-    "ledger",
-    "double-entry",
-    "treasury",
-    "wallets",
-    "marketplace",
-    "fintech"
+    "platform-payment-infrastructure",
+    "marketplace-payments",
+    "marketplace-wallet-api",
+    "creator-payouts",
+    "creator-economy-payments",
+    "creator-platform-payments",
+    "split-payments-api",
+    "closed-loop-payments",
+    "escrow-infrastructure",
+    "checkout-sessions",
+    "payout-orchestration",
+    "revenue-splits",
+    "ledger-backed-payments",
+    "wallet-payments",
+    "creator-balances",
+    "double-entry-ledger",
+    "fintech",
+    "typescript-sdk",
+    "api-client"
   ],
   "author": "Soledgic",
   "license": "MIT",
   "devDependencies": {
+    "@types/node": "^25.9.1",
     "tsup": "^8.5.1",
     "typescript": "^6.0.3",
     "vitest": "^4.1.6"

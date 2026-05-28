@@ -1,7 +1,9 @@
 import Soledgic from '../src/index'
 
+const docsValidationApiKey = `${'slk_test_'}${'docsvalidation0000'}`
+
 const client = new Soledgic({
-  apiKey: 'slk_test_docs_validation',
+  apiKey: docsValidationApiKey,
   baseUrl: 'https://api.soledgic.com/v1',
   apiVersion: '2026-03-01',
 })

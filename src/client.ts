@@ -146,12 +146,17 @@ import { buildSandboxScenarioPayload } from './testing'
 
 export const DEFAULT_API_VERSION = '2026-03-01'
 export const DEFAULT_BASE_URL = 'https://api.soledgic.com/v1'
+const API_KEY_PATTERN = /^slk_(test|live)_[A-Za-z0-9]{16,}$/
 
 export function normalizeBaseUrl(input?: string): string {
   const raw = (input?.trim() || DEFAULT_BASE_URL).replace(/\/+$/, '')
   const deduped = raw.replace(/(?:\/v1)+$/, '/v1')
   if (deduped.endsWith('/v1')) return deduped
   return `${deduped}/v1`
+}
+
+function isValidApiKey(apiKey: string): boolean {
+  return API_KEY_PATTERN.test(apiKey)
 }
 
 function mapKycAddress(address?: KycAddress) {
@@ -197,19 +202,27 @@ export class Soledgic {
   private apiVersion: string
 
   constructor(config: SoledgicConfig) {
-    if (!config.apiKey) {
-      throw new Error('apiKey is required')
+    const rawConfig = config && typeof config === 'object'
+      ? config as SoledgicConfig
+      : {} as SoledgicConfig
+    const rawApiKey = (rawConfig as { apiKey?: unknown }).apiKey
+    const apiKey = typeof rawApiKey === 'string' ? rawApiKey.trim() : ''
+    if (typeof rawApiKey !== 'string' || !isValidApiKey(apiKey)) {
+      throw new Error(
+        'Soledgic: apiKey is required and must use the slk_test_... or slk_live_... format.\n' +
+        '  Run: npx soledgic init'
+      )
     }
     // Store key in closure for protection against casual reflection
-    let key: string | null = config.apiKey
+    let key: string | null = apiKey
     this._getKey = () => {
       if (!key) throw new Error('Client has been destroyed')
       return key
     }
     ;(this as any)._destroyKey = () => { key = null }
-    this.baseUrl = normalizeBaseUrl(config.baseUrl)
-    this.timeoutMs = config.timeout ?? 30_000
-    this.apiVersion = (config.apiVersion || '').trim() || DEFAULT_API_VERSION
+    this.baseUrl = normalizeBaseUrl(rawConfig.baseUrl)
+    this.timeoutMs = rawConfig.timeout ?? 30_000
+    this.apiVersion = (rawConfig.apiVersion || '').trim() || DEFAULT_API_VERSION
   }
 
   /** Clear the API key from memory. After calling destroy(), all requests will throw. */
@@ -217,36 +230,119 @@ export class Soledgic {
     (this as any)._destroyKey?.()
   }
 
+  /**
+   * Manage webhook endpoints and verify incoming webhook signatures.
+   *
+   * Soledgic signs every webhook with HMAC-SHA256. Always verify the signature
+   * before processing an event. Use `parseEvent` to get a typed event object.
+   *
+   * @example
+   * // In your webhook handler (e.g. Next.js API route):
+   * const rawBody = await request.text();
+   * const isValid = client.webhooks.verifySignature(
+   *   rawBody,
+   *   request.headers.get('x-soledgic-signature')!,
+   *   process.env.SOLEDGIC_WEBHOOK_SECRET!,
+   * );
+   * if (!isValid) return new Response('Unauthorized', { status: 401 });
+   *
+   * const event = client.webhooks.parseEvent(rawBody);
+   * if (event.type === 'checkout.completed') { ... }
+   */
   readonly webhooks = {
+    /**
+     * Verify the HMAC-SHA256 signature on an incoming webhook payload.
+     * Returns `true` if the signature is valid, `false` otherwise.
+     * Always verify before processing — replay attacks are real.
+     */
     verifySignature: (
       payload: WebhookPayloadInput,
       signatureHeader: string,
       secret: string,
       options?: VerifyWebhookSignatureOptions,
     ) => verifyWebhookSignature(payload, signatureHeader, secret, options),
+
+    /**
+     * Parse a raw webhook payload into a typed event object.
+     * Call after `verifySignature` confirms the payload is authentic.
+     */
     parseEvent: <T = Record<string, unknown>>(payload: WebhookPayloadInput) =>
       parseWebhookEvent<T>(payload),
+
+    /** List all registered webhook endpoints for this API key. */
     listEndpoints: () => this.listWebhookEndpoints(),
+
+    /**
+     * Register a URL to receive webhook events.
+     * Omit `events` to subscribe to all event types.
+     *
+     * @example
+     * await client.webhooks.createEndpoint({
+     *   url: process.env.SOLEDGIC_WEBHOOK_URL!,
+     *   events: ['checkout.completed', 'payout.executed', 'refund_request.created'],
+     * });
+     */
     createEndpoint: (config: { url: string; description?: string; events?: string[] }) =>
       this.createWebhookEndpoint(config),
+
+    /** Update a webhook endpoint's URL, event subscriptions, or active status. */
     updateEndpoint: (
       endpointId: string,
       updates: { url?: string; description?: string; events?: string[]; isActive?: boolean },
     ) => this.updateWebhookEndpoint(endpointId, updates),
+
+    /** Remove a webhook endpoint. Delivery to this URL stops immediately. */
     deleteEndpoint: (endpointId: string) => this.deleteWebhookEndpoint(endpointId),
+
+    /** Send a synthetic test event to a webhook endpoint to confirm delivery is working. */
     testEndpoint: (endpointId: string) => this.testWebhookEndpoint(endpointId),
+
+    /** List recent webhook delivery attempts, including status codes and response bodies. */
     listDeliveries: (requestOrEndpointId?: WebhookDeliveriesRequest | string, limit?: number) =>
       this.getWebhookDeliveries(requestOrEndpointId, limit),
+
+    /** Re-send a previously delivered event. Useful for replaying events your handler missed. */
     replayDelivery: (deliveryId: string) => this.replayWebhookDelivery(deliveryId),
+
+    /** Retry a failed delivery attempt. */
     retryDelivery: (deliveryId: string) => this.retryWebhookDelivery(deliveryId),
+
+    /**
+     * Rotate the HMAC signing secret for a webhook endpoint.
+     * Update your handler's `SOLEDGIC_WEBHOOK_SECRET` env var after rotating.
+     */
     rotateSecret: (endpointId: string) => this.rotateWebhookSecret(endpointId),
   }
 
+  /**
+   * Platform health and API status.
+   */
   readonly platform = {
+    /** Check that the Soledgic API is reachable and returning healthy responses. */
     getStatus: () => this.getHealthStatus(),
   }
 
+  /**
+   * Consumer/buyer wallet management.
+   *
+   * `consumer_credit` wallets hold platform credits a buyer can spend at checkout.
+   * Use `users.upsertWallet` on signup or first login — it is safe to call multiple times.
+   *
+   * @useCase Closed-Loop Consumer Wallet
+   * @intent Issue spendable platform credits to buyers inside a closed-loop economy
+   *
+   * @example
+   * const { wallet } = await client.users.upsertWallet({
+   *   externalUserId: 'user_123',
+   *   name: 'Jane Doe',
+   * });
+   * // wallet.id is the Soledgic wallet ID — store it or derive it from externalUserId
+   */
   readonly users = {
+    /**
+     * Create or retrieve a `consumer_credit` wallet for a buyer.
+     * Idempotent on `externalUserId` — safe to call on every signup or login.
+     */
     upsertWallet: (req: UpsertUserWalletRequest) => this.createWallet({
       ownerId: req.externalUserId,
       ownerType: req.ownerType || 'user',
@@ -259,7 +355,34 @@ export class Soledgic {
     }),
   }
 
+  /**
+   * Onboard and manage creators — sellers, instructors, or any participant who earns money.
+   *
+   * Creators are the central concept in Soledgic's revenue model. Each creator has
+   * a participant profile, a `creator_earnings` wallet, and a default revenue split
+   * percent. Call `creators.upsert` when a user becomes a seller on your platform.
+   *
+   * @useCase Marketplace Seller Onboarding
+   * @intent Register a creator with a default revenue split applied to all future checkouts
+   *
+   * @example
+   * // Onboard a creator with an 85% revenue share
+   * await client.creators.upsert({
+   *   externalCreatorId: 'creator_maya',
+   *   displayName: 'Maya Chen',
+   *   email: process.env.CREATOR_EMAIL,
+   *   defaultSplitPercent: 85,
+   * });
+   *
+   * // Check if they can receive a payout yet
+   * const eligibility = await client.creators.getPayoutEligibility('creator_maya');
+   */
   readonly creators = {
+    /**
+     * Create or update a creator profile. Idempotent on `externalCreatorId` — safe to
+     * call on every login. Sets the default revenue split applied to all future checkouts.
+     * `defaultSplitPercent` is the creator's share (e.g. 90 means creator keeps 90%, platform keeps 10%).
+     */
     upsert: (req: UpsertCreatorRequest) => this.createParticipant({
       participantId: req.externalCreatorId,
       userId: req.userId,
@@ -273,8 +396,22 @@ export class Soledgic {
         external_creator_id: req.externalCreatorId,
       },
     }),
+
+    /** Fetch a creator's profile, KYC status, and current configuration. */
     get: (creatorId: string) => this.getParticipant(creatorId),
+
+    /**
+     * Check whether a creator is currently eligible to receive a payout.
+     * Returns eligibility status, reasons for ineligibility (missing KYC, no bank account, etc.),
+     * and available balance. Call this before `payouts.request` to surface clear errors to creators.
+     */
     getPayoutEligibility: (creatorId: string) => this.getParticipantPayoutEligibility(creatorId),
+
+    /**
+     * Explicitly create a `creator_earnings` wallet for a creator.
+     * This is normally created automatically on the first checkout completion —
+     * call this only if you need the wallet to exist before any sale has occurred.
+     */
     createWallet: (req: CreateCreatorWalletRequest) => this.createWallet({
       participantId: req.creatorId,
       walletType: 'creator_earnings',
@@ -286,80 +423,395 @@ export class Soledgic {
     }),
   }
 
+  /**
+   * Create hosted checkout sessions. Alias for `purchases`.
+   * Prefer `purchases.create` for new integrations — same underlying method.
+   */
   readonly orders = {
+    /**
+     * Create a hosted checkout session tied to a creator.
+     * On payment completion, the ledger is updated atomically:
+     * creator wallet credited, platform fee collected, webhooks fired.
+     *
+     * @example
+     * const session = await client.orders.createCheckout({
+     *   creatorId: 'creator_maya',
+     *   amount: 4900,           // $49.00 in cents
+     *   productName: 'Design system kit',
+     *   successUrl: process.env.CHECKOUT_SUCCESS_URL!,
+     *   cancelUrl: process.env.CHECKOUT_CANCEL_URL!,
+     * });
+     * // Redirect buyer to session.checkoutSession.checkoutUrl
+     */
     createCheckout: (req: UniversalCheckoutRequest) => this.createUniversalCheckout(req),
   }
 
+  /**
+   * Create hosted checkout sessions for marketplace purchases.
+   *
+   * This is the primary way to collect payment for a creator's product.
+   * The checkout session links buyer → product → creator. When payment completes,
+   * Soledgic applies the revenue split atomically and fires `checkout.completed`.
+   *
+   * @useCase Marketplace Purchase
+   * @intent Atomic Revenue Split — creator and platform shares applied at payment completion, no reconciliation step
+   *
+   * @example
+   * const session = await client.purchases.create({
+   *   creatorId: 'creator_maya',
+   *   amount: 4900,           // $49.00 in cents
+   *   productName: 'Design system kit',
+   *   externalOrderId: 'order_abc123',   // your stable order ID (idempotency key)
+   *   successUrl: process.env.CHECKOUT_SUCCESS_URL!,
+   * });
+   * redirect(session.checkoutSession.checkoutUrl);
+   */
   readonly purchases = {
+    /**
+     * Create a hosted checkout session. Revenue split between creator and platform
+     * is applied atomically when the buyer completes payment.
+     * Use `externalOrderId` as your idempotency key — safe to retry.
+     */
     create: (req: UniversalCheckoutRequest) => this.createUniversalCheckout(req),
   }
 
+  /**
+   * Simulate payment events in test mode without touching real money.
+   *
+   * All sandbox methods require a test API key (`slk_test_...`).
+   * Use `sandbox.completeCheckout` to simulate a successful payment in your
+   * integration tests or local development — it triggers the full ledger update
+   * and webhook delivery exactly as a real payment would.
+   *
+   * @example
+   * const session = await client.purchases.create({ ... });
+   * await client.sandbox.completeCheckout({
+   *   checkoutSessionId: session.checkoutSession.id,
+   *   idempotencyKey: 'test_complete_001',
+   * });
+   * // creator wallet is now credited, checkout.completed webhook fired
+   */
   readonly sandbox = {
+    /**
+     * Simulate a successful buyer payment for a checkout session.
+     * Triggers the full downstream flow: ledger update, wallet credit, split applied,
+     * and `checkout.completed` webhook delivered. Use in integration tests.
+     */
     completeCheckout: (req: SandboxCheckoutCompleteRequest) => this.completeSandboxCheckout(req),
+
+    /** Simulate a failed payment attempt. Fires `checkout.failed` webhook. */
     failCheckout: (req: SandboxCheckoutFailRequest) => this.failSandboxCheckout(req),
+
+    /** Deliver a synthetic test webhook event to a registered endpoint. */
     sendTestWebhook: (req: SandboxWebhookTestRequest) => this.sendSandboxWebhookTest(req),
+
+    /**
+     * Run a named sandbox scenario — a multi-step payment flow (e.g. full checkout → payout cycle).
+     * Useful for testing end-to-end flows without writing individual step calls.
+     */
     sendScenario: (req: SandboxScenarioRequest) => this.sendSandboxScenario(req),
+
+    /** List recent sandbox events for debugging test runs. */
     listEvents: (req?: SandboxEventsRequest) => this.listSandboxEvents(req),
+
+    /** Remove sandbox test data. Call between test runs to start from a clean state. */
     cleanup: (req?: SandboxCleanupRequest) => this.cleanupSandbox(req),
   }
 
+  /**
+   * Query and manage wallet balances for any platform participant.
+   *
+   * Wallets are the core balance primitive in Soledgic. Each participant can have
+   * multiple wallets by type: `creator_earnings` holds payout-eligible creator revenue;
+   * `consumer_credit` holds spendable buyer credits.
+   *
+   * @useCase Check Creator Earnings Balance
+   * @intent Read real-time ledger balance before requesting a payout or displaying creator dashboard data
+   *
+   * @example
+   * // Get all creator earnings wallets for a creator
+   * const { wallets } = await client.wallets.list({
+   *   ownerId: 'creator_maya',
+   *   walletType: 'creator_earnings',
+   * });
+   * console.log(wallets[0].balance); // current balance in cents
+   *
+   * // Show a buyer their transaction history
+   * const activity = await client.wallets.listActivity(wallets[0].id, { limit: 20 });
+   */
   readonly wallets = {
+    /**
+     * List wallets with optional filtering by owner, type, or participant.
+     * Use `walletType: 'creator_earnings'` to get creator balance wallets,
+     * or `walletType: 'consumer_credit'` for buyer credit wallets.
+     */
     list: (filters?: ListWalletsRequest) => this.listWallets(filters),
+
+    /** Create a new wallet for a participant. Prefer `creators.createWallet` or `users.upsertWallet` for standard wallet types. */
     create: (req: CreateWalletRequest) => this.createWallet(req),
+
+    /** Fetch a single wallet by its Soledgic wallet ID, including current balance. */
     get: (walletId: string) => this.getWallet(walletId),
+
+    /**
+     * Paginated list of ledger entries (transactions) for a wallet.
+     * Use to build activity feeds, balance history views, or export transaction data.
+     */
     listActivity: (walletId: string, options?: { limit?: number; offset?: number }) => this.getWalletEntries(walletId, options),
+
+    /** Add funds to a wallet directly (platform-initiated credit, not a buyer payment). */
     topUp: (req: WalletTopupRequest) => this.topUpWallet(req),
+
+    /** Debit funds from a wallet (platform-initiated). */
     withdraw: (req: WalletWithdrawRequest) => this.withdrawFromWallet(req),
+
+    /**
+     * Move funds between two participant wallets on the same platform.
+     * Both wallets must belong to your platform's ledger.
+     */
     transfer: (req: ParticipantTransferRequest) => this.createTransfer(req),
+
+    /**
+     * Create a hosted payment page that lets a buyer fund their own wallet.
+     * Useful for pre-loading credits before a purchase.
+     */
     createHostedSession: (req: CreateWalletSessionRequest) => this.createWalletSession(req),
   }
 
+  /**
+   * Create hosted wallet funding sessions (buyer-facing top-up pages).
+   * Alias for `wallets.createHostedSession`.
+   */
   readonly walletSessions = {
+    /** Create a hosted payment page for a buyer to fund their own wallet. */
     create: (req: CreateWalletSessionRequest) => this.createWalletSession(req),
   }
 
+  /**
+   * Request and check eligibility for creator ACH payouts.
+   *
+   * Payouts move funds from a creator's `creator_earnings` wallet to their
+   * linked bank account via ACH. Check eligibility first — it surfaces KYC/KYB
+   * status, missing bank account details, and minimum balance requirements.
+   *
+   * @useCase Creator Payout Disbursement
+   * @intent Disburse earned marketplace revenue to a creator's bank account via ACH
+   *
+   * @example
+   * const eligibility = await client.payouts.getEligibility('creator_maya');
+   * if (eligibility.eligible) {
+   *   await client.payouts.request({
+   *     participantId: 'creator_maya',
+   *     amount: eligibility.availableBalance,
+   *     referenceId: `payout_${Date.now()}`,
+   *   });
+   * }
+   */
   readonly payouts = {
+    /**
+     * Queue an ACH payout from a creator's earnings wallet to their bank account.
+     * Throws if the creator is not KYC/KYB approved or has no linked bank account.
+     * Use `referenceId` as your idempotency key — safe to retry with the same value.
+     *
+     * @example
+     * await client.payouts.request({
+     *   participantId: 'creator_maya',
+     *   amount: 4750,                    // $47.50 in cents
+     *   referenceId: 'payout_2026_05_01',
+     * });
+     */
     request: (req: CreatePayoutRequest) => this.createPayout(req),
+
+    /**
+     * Check whether a creator can receive a payout right now.
+     * Returns eligibility status and reasons for any ineligibility
+     * (e.g. KYC pending, no bank account, balance below minimum).
+     */
     getEligibility: (creatorId: string) => this.getParticipantPayoutEligibility(creatorId),
   }
 
+  /**
+   * KYC/KYB verification for your platform and for individual creators.
+   *
+   * Your platform must complete KYB (business verification) before live-mode payouts
+   * are enabled. Each creator must complete KYC before they can receive payouts.
+   * Check status with `kyc.getBusiness` / `kyc.getCreator` before gating features.
+   */
   readonly kyc = {
+    /** Fetch your platform's current KYB (business verification) status and required fields. */
     getBusiness: () => this.getBusinessKyb(),
+
+    /**
+     * Submit or update your platform's KYB information.
+     * Required before live-mode payouts are enabled on your account.
+     */
     submitBusiness: (req: SubmitBusinessKybRequest) => this.submitBusinessKyb(req),
+
+    /** Fetch a creator's KYC verification status. */
     getCreator: (participantId: string) => this.getCreatorKyc(participantId),
+
+    /**
+     * Submit KYC information for a creator.
+     * Required before the creator can receive payouts. Gate your payout UI
+     * on `kyc.getCreator` status rather than asking again on every visit.
+     */
     submitCreator: (req: SubmitCreatorKycRequest) => this.submitCreatorKyc(req),
   }
 
+  /**
+   * Issue refunds on completed sales.
+   *
+   * Refunds reverse a transaction and roll back the corresponding ledger entries.
+   * Use `refundFrom` to control whether the platform, the creator, or both absorb
+   * the refund amount. For buyer-initiated refund flows with an approval step,
+   * use `refundRequests` instead.
+   */
   readonly refunds = {
+    /**
+     * Issue a refund on a completed sale transaction.
+     * `refundFrom: 'both'` splits the refund proportionally between platform and creator.
+     * `refundFrom: 'platform_only'` absorbs the full refund from the platform fee.
+     * `refundFrom: 'creator_only'` debits the creator's wallet entirely.
+     *
+     * @example
+     * await client.refunds.request({
+     *   saleReference: 'order_abc123',
+     *   reason: 'Product not as described',
+     *   refundFrom: 'both',
+     * });
+     */
     request: (req: CreateRefundRequest) => this.createRefund(req),
+
+    /** List refunds with optional filtering by date, status, or participant. */
     list: (req?: ListRefundsRequest) => this.listRefunds(req),
   }
 
+  /**
+   * Manage buyer-initiated refund requests with a review/approval workflow.
+   *
+   * Unlike `refunds.request` (which issues a refund immediately), refund requests
+   * create a pending item your team reviews before issuing. Use this pattern when
+   * you want human review, dispute windows, or platform policy enforcement.
+   *
+   * @example
+   * // Buyer submits a refund request from your UI
+   * const { refundRequest } = await client.refundRequests.create({
+   *   saleReference: 'order_abc123',
+   *   customerId: 'user_456',
+   *   reason: 'Item not received',
+   *   idempotencyKey: 'rr_order_abc123',
+   * });
+   *
+   * // Your support team approves it
+   * await client.refundRequests.approve({ refundRequestId: refundRequest.id });
+   */
   readonly refundRequests = {
+    /**
+     * Create a pending refund request on behalf of a buyer.
+     * Fires `refund_request.created` webhook. Does not issue the refund immediately.
+     */
     create: (req: CreateRefundRequestParams) => this.createRefundRequest(req),
+
+    /** List refund requests with optional status or date filtering. */
     list: (req?: ListRefundRequestsParams) => this.listRefundRequests(req),
+
+    /** Approve a refund request and issue the refund. Fires `refund_request.completed` webhook. */
     approve: (req: ReviewRefundRequestParams) => this.approveRefundRequest(req),
+
+    /** Reject a refund request. Fires `refund_request.rejected` webhook. */
     reject: (req: ReviewRefundRequestParams) => this.rejectRefundRequest(req),
+
+    /** Cancel a refund request before it is reviewed. Fires `refund_request.cancelled` webhook. */
     cancel: (req: ReviewRefundRequestParams) => this.cancelRefundRequest(req),
   }
 
+  /**
+   * Manage escrow-style fund holds.
+   *
+   * Holds lock funds in a wallet pending a condition — delivery confirmation,
+   * dispute window expiry, or manual release. This is the primitive for
+   * escrow-style marketplace flows: funds are committed but not yet payable.
+   *
+   * @example
+   * // Release a hold after delivery is confirmed
+   * await client.holds.release({
+   *   holdId: 'hold_xyz',
+   *   referenceId: 'delivery_confirmed_order_abc',
+   * });
+   */
   readonly holds = {
+    /** List active holds on the platform, optionally filtered by wallet or participant. */
     list: (options?: HoldQueryOptions) => this.listHolds(options),
+
+    /**
+     * Release a hold, making the held funds available for payout or transfer.
+     * Use after delivery confirmation, dispute window expiry, or manual approval.
+     */
     release: (req: ReleaseHoldRequest) => this.releaseHold(req),
   }
 
+  /**
+   * Reverse completed transactions to correct ledger errors.
+   *
+   * Reversals undo a transaction and roll back all associated ledger entries.
+   * Use for error correction (e.g. duplicate charge, wrong amount) — not for
+   * normal refunds. For buyer refunds, use `refunds.request` or `refundRequests`.
+   */
   readonly reversals = {
+    /**
+     * Reverse a transaction and roll back its ledger entries atomically.
+     * This is a hard correction — prefer `refunds` for buyer-facing refund flows.
+     */
     create: (req: ReverseTransactionRequest) => this.reverseTransaction(req),
   }
 
+  /**
+   * Generate and retrieve immutable payment receipts.
+   *
+   * Receipts are Soledgic-hosted, buyer-facing documents for completed payments.
+   * Generate one after `checkout.completed` and share the URL with the buyer.
+   *
+   * @example
+   * // In your checkout.completed webhook handler:
+   * const { receipt } = await client.receipts.generate({
+   *   checkoutId: event.data.checkoutSessionId,
+   *   externalOrderId: event.data.externalOrderId,
+   * });
+   * // Send receipt.url to the buyer's email
+   */
   readonly receipts = {
+    /**
+     * Generate a Soledgic-hosted receipt for a completed checkout.
+     * Returns a URL suitable for sharing with the buyer or embedding in confirmation emails.
+     */
     generate: (req: GenerateReceiptRequest) => this.generateReceipt(req),
+
+    /** Fetch a previously generated receipt by its Soledgic receipt ID. */
     get: (receiptId: string) => this.getReceipt(receiptId),
+
+    /** Upload an external receipt document and associate it with a transaction. */
     upload: (req: UploadReceiptRequest) => this.uploadReceipt(req),
   }
 
+  /**
+   * Query transaction history across wallets.
+   *
+   * Use `activity.listWallet` to power creator earnings dashboards, buyer
+   * transaction history screens, or data exports for reconciliation.
+   *
+   * @example
+   * // Show a creator their last 50 earnings entries
+   * const { entries } = await client.activity.listWallet(walletId, { limit: 50 });
+   */
   readonly activity = {
+    /**
+     * Paginated list of ledger entries for a specific wallet.
+     * Each entry includes amount, direction (credit/debit), type, and timestamp.
+     * Use to build activity feeds, export transaction history, or power balance charts.
+     */
     listWallet: (walletId: string, options?: { limit?: number; offset?: number }) => this.getWalletEntries(walletId, options),
+
+    /** List refund transactions with optional date or status filtering. */
     listRefunds: (req?: ListRefundsRequest) => this.listRefunds(req),
   }
 
@@ -1525,7 +1977,10 @@ export class Soledgic {
       participant: {
         id: participant.id,
         accountId: participant.account_id,
+        created: participant.created ?? true,
         linkedUserId: participant.linked_user_id ?? null,
+        identityLinkId: participant.identity_link_id ?? null,
+        identityLinkStatus: participant.identity_link_status ?? null,
         displayName: participant.display_name,
         email: participant.email,
         defaultSplitPercent: participant.default_split_percent,

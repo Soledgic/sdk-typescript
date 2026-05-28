@@ -1,59 +1,59 @@
 # Soledgic TypeScript SDK
 
-TypeScript client for Soledgic's wallet-first payment infrastructure API for marketplaces, creator platforms, and closed-loop app economies.
+Platform payment infrastructure for creator economy platforms, backed by a live ledger
+for every sale, split, wallet balance, refund, and payout.
 
-This package targets the supported API-key surface:
-
-- `participants`
-- `wallets`
-- `transfers`
-- `holds`
-- `checkout-sessions`
-- `payouts`
-- `refunds`
-- `refundRequests`
-- `sandbox`
-- `receipts`
-- `activity`
-- webhook endpoint management and signature verification
-
-It does not wrap the dashboard/operator control-plane routes such as `/api/identity/*` or `/api/ecosystems/*`.
-
-New integrations should use the namespaced contract shown below. Existing SDK
-integrations remain supported through compatibility shims so current installs do
-not break during the transition.
-
-## Installation
+## First sandbox checkout in 2 minutes
 
 ```bash
-npm install @soledgic/sdk@0.4.1
+npm install @soledgic/sdk@0.5.2
+npx soledgic init                     # Browser auth → writes .env + a runnable test file
+node soledgic-test-checkout.mjs       # Runs a sandbox checkout end-to-end
 ```
+
+You'll see a creator created, a checkout completed, a payment simulated, and the creator's
+earnings balance — without writing a line of code. No production approval, no real money,
+no signup form (the init command does it for you).
+
+Or grab a key manually from the Soledgic signup page.
+
+## What's in the box
+
+Use the SDK to accept payments, create wallets, split revenue, issue refunds, run payouts,
+reconcile balances, keep tax-ready records, and subscribe to signed webhooks from one API
+surface. Built for marketplaces, creator platforms, embedded finance products, and
+closed-loop app economies that need more than a processor checkout.
+
+Supported API surface:
+
+- `participants`, `wallets`, `transfers`, `holds`
+- `checkout-sessions`, `payouts`, `refunds`, `refundRequests`
+- `sandbox`, `receipts`, `activity`
+- webhook endpoint management and signature verification
 
 ## Network Access
 
 This SDK makes HTTPS requests only when you call client methods. Requests go to
 the configured Soledgic API base URL.
 
-Default:
-
-```text
-https://api.soledgic.com/v1
-```
-
-You may override this for sandbox, staging, or internal testing with the
-`baseUrl` client option. The SDK does not perform background telemetry,
-post-install network calls, or calls to third-party analytics endpoints.
+By default the SDK uses the exported `DEFAULT_BASE_URL` value. You may
+override this for sandbox, staging, or internal testing with the `baseUrl`
+client option. The SDK does not perform background telemetry, install-time
+network calls, or calls to third-party analytics endpoints.
 
 ## Quick Start
 
 ```ts
-import SoledgicClient from '@soledgic/sdk'
+import Soledgic from '@soledgic/sdk'
 
-const soledgic = new SoledgicClient({
+const soledgic = new Soledgic({
   apiKey: process.env.SOLEDGIC_API_KEY!,
-  baseUrl: process.env.SOLEDGIC_BASE_URL || 'https://api.soledgic.com/v1',
+  baseUrl: process.env.SOLEDGIC_BASE_URL,
   apiVersion: '2026-03-01',
 })
+
+const successUrl = process.env.CHECKOUT_SUCCESS_URL!
+const cancelUrl = process.env.CHECKOUT_CANCEL_URL!
 
 const userWallet = await soledgic.users.upsertWallet({
   externalUserId: 'user_123',
@@ -64,7 +64,6 @@ const creator = await soledgic.creators.upsert({
   externalCreatorId: 'creator_456',
   userId: '9f9b62d2-2f32-4b20-bc24-1f86b16cb9eb',
   displayName: 'Jane Creator',
-  email: 'jane@example.com',
   defaultSplitPercent: 80,
 })
 
@@ -76,8 +75,8 @@ const checkout = await soledgic.orders.createCheckout({
   amount: 999,
   currency: 'USD',
   productName: 'Chapter 1',
-  successUrl: 'https://example.com/success',
-  cancelUrl: 'https://example.com/cancel',
+  successUrl,
+  cancelUrl,
 })
 
 const activity = await soledgic.activity.listWallet(userWallet.wallet.id, { limit: 10 })
@@ -121,7 +120,7 @@ participant `creator_balance`, not the consumer wallet:
 await soledgic.kyc.submitCreator({
   participantId: 'creator_456',
   legalName: 'Jane Creator',
-  email: 'jane@example.com',
+  email: process.env.CREATOR_EMAIL!,
   dateOfBirth: '1990-01-01',
   taxIdType: 'ssn',
   taxIdLast4: '1234',
@@ -175,7 +174,7 @@ Hosted wallet sessions have two explicit account paths. Buyer sessions use
 await soledgic.walletSessions.create({
   ownerId: 'sole_user_123',
   ownerType: 'consumer',
-  customerEmail: 'buyer@example.com',
+  customerEmail: process.env.BUYER_EMAIL,
   permissions: ['view_balance', 'list_activity', 'top_up'],
   idempotencyKey: 'wallet_session_user_123_001',
 })
@@ -412,13 +411,3 @@ This SDK is intentionally limited to the public integration contract:
 The SDK performs network requests only to the configured Soledgic API endpoint.
 It does not include analytics, telemetry, third-party trackers, or bundled
 runtime dependencies.
-
-It does not authenticate end-user dashboard sessions, and it does not expose the internal operator routes used for:
-
-- shared identity profiles
-- participant identity linking and unlinking
-- ecosystem management
-- risk, compliance, reconciliation, and tax operations
-- internal production fixture cleanup
-
-Those flows are documented in [docs/OPERATOR_CONTROL_PLANE.md](../../docs/OPERATOR_CONTROL_PLANE.md).
