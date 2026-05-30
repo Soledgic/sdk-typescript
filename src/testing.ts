@@ -23,6 +23,42 @@ export const SOLEDGIC_SANDBOX_WEBHOOK_EVENTS = [
   'payout.failed',
 ] as const satisfies readonly SandboxWebhookEventType[]
 
+export const SOLEDGIC_SANDBOX_TEST_CARDS = [
+  {
+    brand: 'visa',
+    cardId: 'sandbox_visa_success',
+    cvc: '123',
+    expMonth: '12',
+    expYear: '34',
+    last4: '4242',
+    number: '4242 4242 4242 4242',
+    outcome: 'succeeded',
+    postalCode: '10001',
+  },
+  {
+    brand: 'mastercard',
+    cardId: 'sandbox_mastercard_success',
+    cvc: '123',
+    expMonth: '12',
+    expYear: '34',
+    last4: '4444',
+    number: '5555 5555 5555 4444',
+    outcome: 'succeeded',
+    postalCode: '10001',
+  },
+  {
+    brand: 'visa',
+    cardId: 'sandbox_visa_declined',
+    cvc: '123',
+    expMonth: '12',
+    expYear: '34',
+    last4: '0002',
+    number: '4000 0000 0000 0002',
+    outcome: 'declined',
+    postalCode: '10001',
+  },
+] as const
+
 export interface SandboxRunMetadataInput {
   source: string
   runId: string

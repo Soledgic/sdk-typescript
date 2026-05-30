@@ -6,7 +6,7 @@ for every sale, split, wallet balance, refund, and payout.
 ## First sandbox checkout in 2 minutes
 
 ```bash
-npm install @soledgic/sdk@0.5.2
+npm install @soledgic/sdk@0.5.3
 npx soledgic init                     # Browser auth → writes .env + a runnable test file
 node soledgic-test-checkout.mjs       # Runs a sandbox checkout end-to-end
 ```
@@ -88,6 +88,10 @@ console.log({
 })
 ```
 
+Checkout sessions are USD-native today. Pass `currency: 'USD'` or omit currency
+to use the default; non-USD checkout currencies are rejected until Soledgic ships
+end-to-end multicurrency ledger and wallet support.
+
 The wallet API is uniform across integrations, but balances remain scoped.
 Every wallet object belongs to one ledger, one owner, and one wallet type.
 Soledgic derives the organization from the API key's ledger, links wallet
@@ -165,7 +169,9 @@ Supported wallet types:
 earnings wallets are provisioned through participant and treasury flows.
 Wallets and hosted wallet sessions are always bound to the organization behind
 the API key's ledger. Use stable `ownerId` / `externalUserId` values for your
-users; do not pass organization identifiers from your frontend.
+users; do not pass organization identifiers from your frontend. In sandbox
+buyer sessions, `customerEmail` alone can derive a stable test wallet when no
+wallet or owner id is supplied.
 
 Hosted wallet sessions have two explicit account paths. Buyer sessions use
 `ownerType: 'consumer'` or `'user'` and open a `user_wallet`:
@@ -177,6 +183,17 @@ await soledgic.walletSessions.create({
   customerEmail: process.env.BUYER_EMAIL,
   permissions: ['view_balance', 'list_activity', 'top_up'],
   idempotencyKey: 'wallet_session_user_123_001',
+})
+```
+
+For sandbox buyer tests, this also works and reuses the same test wallet for
+the same email within the same Soledgic customer ledger:
+
+```ts
+await soledgic.walletSessions.create({
+  ownerType: 'consumer',
+  customerEmail: 'buyer@example.com',
+  idempotencyKey: 'wallet_session_buyer_example_001',
 })
 ```
 
@@ -235,6 +252,18 @@ Sandbox helpers require test API keys, never run against live ledgers, and never
 call a payment processor. Sandbox payout testing uses the normal
 `payouts.request()` path with a test key; it does not call a bank rail and can
 emit `payout.created` or `payout.failed` webhook events for integration testing.
+
+Hosted Soledgic sandbox wallet and checkout pages accept these test cards:
+
+| Number | Outcome |
+| --- | --- |
+| `4242 4242 4242 4242` | Success |
+| `5555 5555 5555 4444` | Success |
+| `4000 0000 0000 0002` | Decline |
+
+Use any future expiration date, any 3-4 digit CVC, and any postal code with at
+least 3 characters. The SDK exports `SOLEDGIC_SANDBOX_TEST_CARDS` for UI smoke
+tests that need to fill hosted sandbox forms.
 
 Use `sandbox.cleanup()` for cleanup previews and controlled resets:
 

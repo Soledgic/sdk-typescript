@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { Soledgic, SoledgicError, ValidationError, AuthenticationError, NotFoundError, ConflictError, mapWebhookEndpoint, mapWebhookDelivery, timingSafeEqual, webhookPayloadToString, isArrayBufferView, parseWebhookSignatureHeader, parseWebhookEvent, hmacHex, verifyWebhookSignature, resolveWebhookEndpointUrl, normalizeBaseUrl, SOLEDGIC_SANDBOX_WEBHOOK_EVENTS, buildSandboxRunMetadata, assertSandboxCheckoutCompleted, buildSandboxScenarioPayload, buildTestWebhook } from './index'
+import { Soledgic, SoledgicError, ValidationError, AuthenticationError, NotFoundError, ConflictError, mapWebhookEndpoint, mapWebhookDelivery, timingSafeEqual, webhookPayloadToString, isArrayBufferView, parseWebhookSignatureHeader, parseWebhookEvent, hmacHex, verifyWebhookSignature, resolveWebhookEndpointUrl, normalizeBaseUrl, SOLEDGIC_SANDBOX_WEBHOOK_EVENTS, SOLEDGIC_SANDBOX_TEST_CARDS, buildSandboxRunMetadata, assertSandboxCheckoutCompleted, buildSandboxScenarioPayload, buildTestWebhook } from './index'
 
 const BASE_URL = 'https://test.supabase.co/functions/v1'
 const API_KEY = 'slk_test_examplekey000000'
@@ -60,6 +60,19 @@ describe('Soledgic SDK', () => {
     await sdk.listPeriods()
     const [url] = fn.mock.calls[0]
     expect(url).toBe('https://api.soledgic.com/v1/close-period')
+  })
+
+  it('exports hosted sandbox card numbers for UI smoke tests', () => {
+    expect(SOLEDGIC_SANDBOX_TEST_CARDS).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        number: '4242 4242 4242 4242',
+        outcome: 'succeeded',
+      }),
+      expect.objectContaining({
+        number: '4000 0000 0000 0002',
+        outcome: 'declined',
+      }),
+    ]))
   })
 
   it('strips trailing slash from baseUrl', async () => {
@@ -225,7 +238,7 @@ describe('Soledgic SDK', () => {
         customer_email: 'buyer@example.com',
         permissions: ['view_balance', 'list_activity'],
         status: 'active',
-        wallet_url: 'https://checkout.soledgic.com/wallet/wals_123',
+        wallet_url: 'https://soledgic.com/wallet/wals_123',
         success_url: 'https://merchant.example/done',
         cancel_url: 'https://merchant.example/account',
         expires_at: '2026-05-12T12:00:00Z',
@@ -259,8 +272,47 @@ describe('Soledgic SDK', () => {
       idempotency_key: 'wallet_session_user_1',
       metadata: { app: 'merchant' },
     })
-    expect(result.walletSession.walletUrl).toBe('https://checkout.soledgic.com/wallet/wals_123')
+    expect(result.walletSession.walletUrl).toBe('https://soledgic.com/wallet/wals_123')
     expect(result.walletSession.externalUserId).toBe('user_1')
+  })
+
+  it('walletSessions.create allows sandbox customerEmail-only buyer sessions', async () => {
+    const fn = mockFetch({
+      success: true,
+      wallet_session: {
+        id: 'wals_sandbox_email',
+        object: 'wallet_session',
+        wallet_id: '550e8400-e29b-41d4-a716-446655440000',
+        external_user_id: 'sandbox_email_abc123',
+        customer_email: 'buyer@example.com',
+        permissions: ['view_balance', 'list_activity', 'top_up'],
+        status: 'active',
+        wallet_url: 'https://soledgic.com/wallet/wals_sandbox_email',
+        success_url: null,
+        cancel_url: null,
+        expires_at: '2026-05-12T12:00:00Z',
+        created_at: '2026-05-12T11:30:00Z',
+        metadata: { owner_id_source: 'sandbox_customer_email' },
+      },
+    })
+    const sdk = createClient(fn)
+
+    const result = await sdk.walletSessions.create({
+      ownerType: 'consumer',
+      customerEmail: 'buyer@example.com',
+      idempotencyKey: 'wallet_session_buyer_email',
+    })
+
+    const [, opts] = fn.mock.calls[0]
+    const body = JSON.parse(opts.body)
+    expect(body).toMatchObject({
+      owner_type: 'consumer',
+      customer_email: 'buyer@example.com',
+      idempotency_key: 'wallet_session_buyer_email',
+    })
+    expect(body).not.toHaveProperty('external_user_id')
+    expect(result.walletSession.externalUserId).toBe('sandbox_email_abc123')
+    expect(result.walletSession.customerEmail).toBe('buyer@example.com')
   })
 
   it('walletSessions.create sends participant owner type for creator earnings sessions', async () => {
@@ -274,7 +326,7 @@ describe('Soledgic SDK', () => {
         customer_email: null,
         permissions: ['view_balance', 'list_activity'],
         status: 'active',
-        wallet_url: 'https://checkout.soledgic.com/wallet/wals_creator_123',
+        wallet_url: 'https://soledgic.com/wallet/wals_creator_123',
         success_url: 'https://merchant.example/creator',
         cancel_url: null,
         expires_at: '2026-05-12T12:00:00Z',
@@ -4991,7 +5043,7 @@ describe('Soledgic SDK', () => {
           status: 'pending',
           requires_action: false,
           amount: 2500,
-          currency: 'GBP',
+          currency: 'USD',
           expires_at: '2026-04-01T00:00:00Z',
           breakdown: {
             gross_amount: 2500,
@@ -5007,7 +5059,7 @@ describe('Soledgic SDK', () => {
         participantId: 'p_1',
         successUrl: 'https://example.com/success',
         cancelUrl: 'https://example.com/cancel',
-        currency: 'GBP',
+        currency: 'USD',
         customerEmail: 'test@example.com',
       })
 
@@ -5021,7 +5073,7 @@ describe('Soledgic SDK', () => {
       expect(cs.status).toBe('pending')
       expect(cs.requiresAction).toBe(false)
       expect(cs.amount).toBe(2500)
-      expect(cs.currency).toBe('GBP')
+      expect(cs.currency).toBe('USD')
       expect(cs.expiresAt).toBe('2026-04-01T00:00:00Z')
       expect(cs.breakdown).not.toBeNull()
       expect(cs.breakdown!.grossAmount).toBe(2500)
@@ -7345,11 +7397,25 @@ describe('Soledgic SDK', () => {
       const result = await sdk.createCheckoutSession({
         amount: 2000,
         participantId: 'p_1',
-        currency: 'GBP',
+        currency: 'USD',
         successUrl: 'https://example.com/ok',
       })
 
-      expect(result.checkoutSession.currency).toBe('GBP')
+      expect(result.checkoutSession.currency).toBe('USD')
+    })
+
+    it('createCheckoutSession rejects non-USD currency before the request', async () => {
+      const fn = mockFetch({ success: true })
+      const sdk = createClient(fn)
+
+      await expect(sdk.createCheckoutSession({
+        amount: 2000,
+        participantId: 'p_1',
+        currency: 'EUR',
+        successUrl: 'https://example.com/ok',
+      } as any)).rejects.toThrow('Soledgic checkout sessions currently support USD only')
+
+      expect(fn).not.toHaveBeenCalled()
     })
 
     // --- client.ts: createCheckoutSession id fallback chain ---
@@ -8934,22 +9000,28 @@ describe('Soledgic SDK', () => {
       await sdk.createCheckoutSession({
         amount: 5000,
         participantId: 'p_cs',
-        currency: 'GBP',
+        currency: 'USD',
         productId: 'prod_cs',
         productName: 'Premium Plan',
         customerEmail: 'buyer@example.com',
         customerId: 'cust_cs',
+        buyerUserId: 'buyer_cs',
+        purchaseMode: 'direct_funded_wallet',
+        sandboxCheckoutProvider: 'stripe',
         successUrl: 'https://example.com/ok',
         cancelUrl: 'https://example.com/cancel',
         metadata: { plan: 'premium' },
       })
 
       const body = JSON.parse(fn.mock.calls[0][1].body)
-      expect(body.currency).toBe('GBP')
+      expect(body.currency).toBe('USD')
       expect(body.product_id).toBe('prod_cs')
       expect(body.product_name).toBe('Premium Plan')
       expect(body.customer_email).toBe('buyer@example.com')
       expect(body.customer_id).toBe('cust_cs')
+      expect(body.buyer_user_id).toBe('buyer_cs')
+      expect(body.purchase_mode).toBe('direct_funded_wallet')
+      expect(body.sandbox_checkout_provider).toBe('stripe')
       expect(body.cancel_url).toBe('https://example.com/cancel')
       expect(body.metadata).toEqual({ plan: 'premium' })
     })

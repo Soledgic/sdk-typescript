@@ -2748,15 +2748,22 @@ export class Soledgic {
     if (!hasPaymentMethod && !req.successUrl) {
       throw new Error('Either paymentMethodId/sourceId or successUrl is required')
     }
+    const currency = req.currency?.toUpperCase()
+    if (currency && currency !== 'USD') {
+      throw new Error('Soledgic checkout sessions currently support USD only')
+    }
 
     const response = await this.request<any>('checkout-sessions', {
       amount: req.amount,
       participant_id: req.participantId,
-      currency: req.currency,
+      currency,
       product_id: req.productId,
       product_name: req.productName,
       customer_email: req.customerEmail,
       customer_id: req.customerId,
+      buyer_user_id: req.buyerUserId,
+      purchase_mode: req.purchaseMode,
+      sandbox_checkout_provider: req.sandboxCheckoutProvider,
       payment_method_id: 'paymentMethodId' in req ? req.paymentMethodId : undefined,
       source_id: 'sourceId' in req ? req.sourceId : undefined,
       success_url: req.successUrl,
@@ -2771,15 +2778,17 @@ export class Soledgic {
       success: Boolean(response.success),
       checkoutSession: {
         id: checkoutSession.id ?? checkoutSession.payment_id ?? checkoutSession.payment_intent_id,
-        mode: checkoutSession.mode === 'session' ? 'session' : 'direct',
+        mode: checkoutSession.mode ?? (checkoutSession.payment_id || checkoutSession.payment_intent_id ? 'direct' : 'session'),
+        provider: checkoutSession.provider ?? null,
         checkoutUrl: checkoutSession.checkout_url ?? null,
         paymentId: checkoutSession.payment_id ?? null,
         paymentIntentId: checkoutSession.payment_intent_id ?? checkoutSession.payment_id ?? null,
         status: checkoutSession.status ?? null,
         requiresAction: Boolean(checkoutSession.requires_action),
         amount: checkoutSession.amount ?? req.amount,
-        currency: checkoutSession.currency ?? (req.currency || 'USD'),
+        currency: checkoutSession.currency ?? (currency || 'USD'),
         expiresAt: checkoutSession.expires_at ?? null,
+        sandbox: Boolean(checkoutSession.sandbox),
         fundingTransactionId: checkoutSession.funding_transaction_id ?? null,
         saleTransactionId: checkoutSession.sale_transaction_id ?? null,
         saleReference: checkoutSession.sale_reference ?? null,
@@ -2798,8 +2807,9 @@ export class Soledgic {
   async createWalletSession(
     req: CreateWalletSessionRequest,
   ): Promise<CreateWalletSessionResponse> {
-    if (!req.walletId && !req.ownerId && !req.externalUserId) {
-      throw new Error('walletId, ownerId, or externalUserId is required')
+    const creatorSession = req.ownerType === 'participant' || req.ownerType === 'creator'
+    if (!req.walletId && !req.ownerId && !req.externalUserId && (creatorSession || !req.customerEmail)) {
+      throw new Error('walletId, ownerId, externalUserId, or sandbox buyer customerEmail is required')
     }
 
     const response = await this.request<any>('wallet-sessions', {

@@ -650,11 +650,15 @@ export interface ReleaseHoldRequest {
 export type CreateCheckoutSessionRequest = {
   participantId: string
   amount: number
-  currency?: string
+  currency?: 'USD'
   productId?: string
   productName?: string
+  /** Customer email for hosted display/receipts. Sandbox buyer sessions can use this alone to derive a stable test wallet. */
   customerEmail?: string
   customerId?: string
+  buyerUserId?: string
+  purchaseMode?: 'direct_funded_wallet'
+  sandboxCheckoutProvider?: 'soledgic' | 'stripe'
   metadata?: Record<string, string>
 } & (
   { paymentMethodId: string; sourceId?: string; idempotencyKey: string; successUrl?: string; cancelUrl?: string } |
@@ -1757,6 +1761,7 @@ export interface CheckoutSessionResourceResponse {
   checkoutSession: {
     id: string
     mode: 'session' | 'direct' | string
+    provider: string | null
     checkoutUrl: string | null
     paymentId: string | null
     paymentIntentId: string | null
@@ -1765,6 +1770,7 @@ export interface CheckoutSessionResourceResponse {
     amount: number
     currency: string
     expiresAt: string | null
+    sandbox: boolean
     fundingTransactionId: string | null
     saleTransactionId: string | null
     saleReference: string | null
