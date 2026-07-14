@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { Soledgic, SoledgicError, ValidationError, AuthenticationError, NotFoundError, ConflictError, mapWebhookEndpoint, mapWebhookDelivery, timingSafeEqual, webhookPayloadToString, isArrayBufferView, parseWebhookSignatureHeader, parseWebhookEvent, hmacHex, verifyWebhookSignature, resolveWebhookEndpointUrl, normalizeBaseUrl, SOLEDGIC_SANDBOX_WEBHOOK_EVENTS, SOLEDGIC_SANDBOX_TEST_CARDS, buildSandboxRunMetadata, assertSandboxCheckoutCompleted, buildSandboxScenarioPayload, buildTestWebhook } from './index'
+import { Soledgic, SoledgicError, ValidationError, AuthenticationError, NotFoundError, ConflictError, mapWebhookEndpoint, mapWebhookDelivery, timingSafeEqual, webhookPayloadToString, isArrayBufferView, parseWebhookSignatureHeader, parseWebhookEvent, hmacHex, verifyWebhookSignature, resolveWebhookEndpointUrl, normalizeBaseUrl, SOLEDGIC_SANDBOX_WEBHOOK_EVENTS, SOLEDGIC_SANDBOX_TEST_CARDS, SOLEDGIC_SDK_VERSION, buildSandboxRunMetadata, assertSandboxCheckoutCompleted, buildSandboxScenarioPayload, buildTestWebhook } from './index'
 
 const BASE_URL = 'https://test.supabase.co/functions/v1'
 const API_KEY = 'slk_test_examplekey000000'
@@ -148,6 +148,165 @@ describe('Soledgic SDK', () => {
     })
   })
 
+  it('wallets.sharedSpend posts to wallets/shared-spend with the mapped body', async () => {
+    const fn = mockFetch({
+      success: true,
+      spend: {
+        consumer_transaction_id: 'ctx_1',
+        platform_transaction_id: 'ptx_1',
+        reference_id: 'ref_1',
+        amount_cents: 5000,
+        creator_id: 'creator_1',
+        wallet_balance_cents: 15000,
+        creator_balance_cents: 2915,
+      },
+    })
+    const sdk = createClient(fn)
+
+    const res = await sdk.wallets.sharedSpend({
+      consumerSub: 'sub_abc',
+      amount: 5000,
+      referenceId: 'ref_1',
+      creatorId: 'creator_1',
+      creatorPercent: 80,
+      salesTax: 0,
+      productName: 'Shoes',
+    })
+
+    const [url, opts] = fn.mock.calls[0]
+    const body = JSON.parse(opts.body)
+    expect(url).toBe(`${BASE_URL}/wallets/shared-spend`)
+    expect(body).toMatchObject({
+      consumer_sub: 'sub_abc',
+      amount: 5000,
+      reference_id: 'ref_1',
+      creator_id: 'creator_1',
+      creator_percent: 80,
+      sales_tax: 0,
+      product_name: 'Shoes',
+    })
+    expect(res.consumerTransactionId).toBe('ctx_1')
+    expect(res.walletBalanceCents).toBe(15000)
+    expect(res.creatorBalanceCents).toBe(2915)
+  })
+
+  it('wallets.sharedHold posts to wallets/shared-hold and maps the hold', async () => {
+    const fn = mockFetch({
+      success: true,
+      hold: {
+        hold_id: 'hold_1',
+        consumer_transaction_id: 'ctx_h',
+        platform_transaction_id: 'ptx_h',
+        reference_id: 'order_1',
+        amount_cents: 5000,
+        creator_id: 'creator_1',
+        status: 'held',
+        wallet_balance_cents: 15000,
+      },
+    })
+    const sdk = createClient(fn)
+
+    const res = await sdk.wallets.sharedHold({
+      consumerSub: 'sub_abc',
+      amount: 5000,
+      referenceId: 'order_1',
+      creatorId: 'creator_1',
+      creatorPercent: 80,
+      productName: 'Shoes',
+    })
+
+    const [url, opts] = fn.mock.calls[0]
+    const body = JSON.parse(opts.body)
+    expect(url).toBe(`${BASE_URL}/wallets/shared-hold`)
+    expect(body).toMatchObject({
+      consumer_sub: 'sub_abc',
+      amount: 5000,
+      reference_id: 'order_1',
+      creator_id: 'creator_1',
+      creator_percent: 80,
+    })
+    expect(res.holdId).toBe('hold_1')
+    expect(res.status).toBe('held')
+    expect(res.walletBalanceCents).toBe(15000)
+  })
+
+  it('wallets.releaseSharedHold posts to wallets/shared-hold/release', async () => {
+    const fn = mockFetch({
+      success: true,
+      release: { release_transaction_id: 'rtx_1', reference_id: 'order_1', status: 'released', creator_balance_cents: 2915 },
+    })
+    const sdk = createClient(fn)
+
+    const res = await sdk.wallets.releaseSharedHold({ referenceId: 'order_1' })
+
+    const [url, opts] = fn.mock.calls[0]
+    const body = JSON.parse(opts.body)
+    expect(url).toBe(`${BASE_URL}/wallets/shared-hold/release`)
+    expect(body).toMatchObject({ reference_id: 'order_1' })
+    expect(res.releaseTransactionId).toBe('rtx_1')
+    expect(res.status).toBe('released')
+    expect(res.creatorBalanceCents).toBe(2915)
+  })
+
+  it('wallets.refundSharedHold posts to wallets/shared-hold/refund', async () => {
+    const fn = mockFetch({
+      success: true,
+      refund: { consumer_transaction_id: 'ctx_r', platform_transaction_id: 'ptx_r', reference_id: 'order_1', status: 'refunded', wallet_balance_cents: 20000 },
+    })
+    const sdk = createClient(fn)
+
+    const res = await sdk.wallets.refundSharedHold({ referenceId: 'order_1', reason: 'cancelled' })
+
+    const [url, opts] = fn.mock.calls[0]
+    const body = JSON.parse(opts.body)
+    expect(url).toBe(`${BASE_URL}/wallets/shared-hold/refund`)
+    expect(body).toMatchObject({ reference_id: 'order_1', reason: 'cancelled' })
+    expect(res.consumerTransactionId).toBe('ctx_r')
+    expect(res.status).toBe('refunded')
+    expect(res.walletBalanceCents).toBe(20000)
+  })
+
+  it('wallets.reverseSharedSpend posts to wallets/shared-spend/reverse', async () => {
+    const fn = mockFetch({
+      success: true,
+      reversal: {
+        consumer_reversal_transaction_id: 'crtx_1',
+        platform_reversal_transaction_id: 'prtx_1',
+        sale_transaction_id: 'ptx_1',
+        status: 'reversed',
+        wallet_balance_cents: 20000,
+        creator_balance_cents: -2915,
+      },
+    })
+    const sdk = createClient(fn)
+
+    const res = await sdk.wallets.reverseSharedSpend({ saleTransactionId: 'ptx_1', reason: 'buyer refund' })
+
+    const [url, opts] = fn.mock.calls[0]
+    const body = JSON.parse(opts.body)
+    expect(url).toBe(`${BASE_URL}/wallets/shared-spend/reverse`)
+    expect(body).toMatchObject({ sale_transaction_id: 'ptx_1', reason: 'buyer refund' })
+    expect(res.consumerReversalTransactionId).toBe('crtx_1')
+    expect(res.status).toBe('reversed')
+    expect(res.walletBalanceCents).toBe(20000)
+    expect(res.creatorBalanceCents).toBe(-2915)
+  })
+
+  it('wallets.revokeSharedSpendAuthorization posts to wallets/shared-spend/authorization/revoke', async () => {
+    const fn = mockFetch({ success: true, revoked: true, consumer_sub: 'sub_123' })
+    const sdk = createClient(fn)
+
+    const res = await sdk.wallets.revokeSharedSpendAuthorization({ consumerSub: 'sub_123' })
+
+    const [url, opts] = fn.mock.calls[0]
+    const body = JSON.parse(opts.body)
+    expect(url).toBe(`${BASE_URL}/wallets/shared-spend/authorization/revoke`)
+    expect(body).toMatchObject({ consumer_sub: 'sub_123' })
+    expect(res.success).toBe(true)
+    expect(res.revoked).toBe(true)
+    expect(res.consumerSub).toBe('sub_123')
+  })
+
   it('creators.upsert maps external creators to participants', async () => {
     const fn = mockFetch({
       success: true,
@@ -225,6 +384,150 @@ describe('Soledgic SDK', () => {
         external_user_id: 'user_1',
       },
     })
+  })
+
+  it('orders.createCheckout preserves canonical participantId from untyped callers', async () => {
+    const fn = mockFetch({
+      success: true,
+      checkout_session: { id: 'cs_dfw', mode: 'direct_funded_wallet', checkout_url: 'https://pay.example/cs_dfw', amount: 1500, currency: 'USD' },
+    })
+    const sdk = createClient(fn)
+
+    // Plain-JS integrations have passed createCheckoutSession vocabulary here;
+    // the universal aliases must never clobber it with undefined.
+    await sdk.orders.createCheckout({
+      participantId: 'creator_2',
+      amount: 1500,
+      purchaseMode: 'direct_funded_wallet',
+      buyerUserId: 'buyer_9',
+      successUrl: 'https://app.example/success',
+    } as any)
+
+    const body = JSON.parse(fn.mock.calls[0][1].body)
+    expect(body.participant_id).toBe('creator_2')
+    expect(body.purchase_mode).toBe('direct_funded_wallet')
+    expect(body.buyer_user_id).toBe('buyer_9')
+  })
+
+  it('orders.createCheckout supports wallet-funded purchases via purchaseMode', async () => {
+    const fn = mockFetch({
+      success: true,
+      checkout_session: { id: 'cs_dfw2', mode: 'direct_funded_wallet', checkout_url: 'https://pay.example/cs_dfw2', amount: 2000, currency: 'USD' },
+    })
+    const sdk = createClient(fn)
+
+    await sdk.orders.createCheckout({
+      creatorId: 'creator_3',
+      amount: 2000,
+      buyerUserId: 'buyer_10',
+      purchaseMode: 'direct_funded_wallet',
+      successUrl: 'https://app.example/success',
+    })
+
+    const body = JSON.parse(fn.mock.calls[0][1].body)
+    expect(body.participant_id).toBe('creator_3')
+    expect(body.purchase_mode).toBe('direct_funded_wallet')
+    expect(body.buyer_user_id).toBe('buyer_10')
+    expect(body.success_url).toBe('https://app.example/success')
+  })
+
+  it('purchases.createWalletFundedCheckout serializes the canonical hosted wallet fields', async () => {
+    const fn = mockFetch({
+      success: true,
+      checkout_session: {
+        id: 'cs_wallet_funded',
+        mode: 'direct_funded_wallet',
+        provider: 'stripe',
+        checkout_url: 'https://checkout.example/cs_wallet_funded',
+        amount: 7999,
+        currency: 'USD',
+      },
+    })
+    const sdk = createClient(fn)
+
+    await sdk.purchases.createWalletFundedCheckout({
+      creatorId: 'creator_book',
+      buyerUserId: '  buyer_reader  ',
+      externalUserId: 'reader_customer',
+      externalOrderId: 'order_book_001',
+      externalProductId: 'book_001',
+      productName: 'Digital book',
+      amount: 7999,
+      currency: 'USD',
+      successUrl: 'https://books.example/read',
+      cancelUrl: 'https://books.example/book',
+      metadata: { flow: 'book_purchase' },
+    })
+
+    const body = JSON.parse(fn.mock.calls[0][1].body)
+    expect(body).toMatchObject({
+      amount: 7999,
+      participant_id: 'creator_book',
+      buyer_user_id: 'buyer_reader',
+      purchase_mode: 'direct_funded_wallet',
+      customer_id: 'reader_customer',
+      product_id: 'book_001',
+      product_name: 'Digital book',
+      success_url: 'https://books.example/read',
+      cancel_url: 'https://books.example/book',
+      idempotency_key: 'order_book_001',
+      metadata: {
+        flow: 'book_purchase',
+        external_order_id: 'order_book_001',
+        external_product_id: 'book_001',
+        external_user_id: 'reader_customer',
+      },
+    })
+    expect(body.payment_method_id).toBeUndefined()
+    expect(body.source_id).toBeUndefined()
+  })
+
+  it('orders.createWalletFundedCheckout is an alias for the explicit purchase flow', async () => {
+    const fn = mockFetch({
+      success: true,
+      checkout_session: {
+        id: 'cs_wallet_alias',
+        mode: 'direct_funded_wallet',
+        checkout_url: 'https://checkout.example/cs_wallet_alias',
+        amount: 2500,
+        currency: 'USD',
+      },
+    })
+    const sdk = createClient(fn)
+
+    await sdk.orders.createWalletFundedCheckout({
+      creatorId: 'creator_alias',
+      buyerUserId: 'buyer_alias',
+      amount: 2500,
+      successUrl: 'https://app.example/success',
+    })
+
+    const body = JSON.parse(fn.mock.calls[0][1].body)
+    expect(body.participant_id).toBe('creator_alias')
+    expect(body.buyer_user_id).toBe('buyer_alias')
+    expect(body.purchase_mode).toBe('direct_funded_wallet')
+  })
+
+  it('rejects a blank buyerUserId before creating any direct_funded_wallet checkout', async () => {
+    const fn = mockFetch({ success: true })
+    const sdk = createClient(fn)
+
+    await expect(sdk.purchases.createWalletFundedCheckout({
+      creatorId: 'creator_4',
+      buyerUserId: '   ',
+      amount: 2000,
+      successUrl: 'https://app.example/success',
+    })).rejects.toThrow('buyerUserId is required for direct_funded_wallet checkout')
+
+    await expect(sdk.createCheckoutSession({
+      participantId: 'creator_4',
+      buyerUserId: '',
+      purchaseMode: 'direct_funded_wallet',
+      amount: 2000,
+      successUrl: 'https://app.example/success',
+    } as any)).rejects.toThrow('buyerUserId is required for direct_funded_wallet checkout')
+
+    expect(fn).not.toHaveBeenCalled()
   })
 
   it('walletSessions.create maps hosted wallet sessions', async () => {
@@ -365,12 +668,12 @@ describe('Soledgic SDK', () => {
   })
 
   it('payouts, refunds, receipts, holds, reversals, and activity expose resource-first aliases', async () => {
-    const refundFn = mockFetch({ success: true, refund: { id: 'refund_1', transaction_id: 'tx_1', refunded_amount: 500, currency: 'USD', status: 'posted' } })
+    const refundFn = mockFetch({ success: true, refund: { id: 'refund_1', transaction_id: 'tx_1', refunded_amount_cents: 500, currency: 'USD', status: 'posted' } })
     const sdk = createClient(refundFn)
     await sdk.refunds.request({ saleReference: 'sale_1', reason: 'customer_request', amount: 500 })
     expect(String(refundFn.mock.calls[0][0])).toContain('/refunds')
 
-    const payoutFn = mockFetch({ success: true, eligibility: { participant_id: 'creator_1', eligible: true, available_balance: 1000, issues: [], requirements: {} } })
+    const payoutFn = mockFetch({ success: true, eligibility: { participant_id: 'creator_1', eligible: true, available_balance_cents: 1000, issues: [], requirements: {} } })
     vi.stubGlobal('fetch', payoutFn)
     await sdk.payouts.getEligibility('creator_1')
     expect(String(payoutFn.mock.calls[0][0])).toContain('/participants/creator_1/payout-eligibility')
@@ -384,6 +687,79 @@ describe('Soledgic SDK', () => {
     vi.stubGlobal('fetch', activityFn)
     await sdk.activity.listWallet('wallet_1', { limit: 10 })
     expect(String(activityFn.mock.calls[0][0])).toContain('/wallets/wallet_1/entries')
+  })
+
+  it('memberships expose tier, signup, renewal, cancellation, and entitlement resource calls', async () => {
+    const fn = mockFetch({
+      success: true,
+      tier: {
+        id: '550e8400-e29b-41d4-a716-446655440000',
+        tier_key: 'pro',
+        name: 'Pro',
+        participant_id: 'creator_1',
+        amount_cents: 1900,
+        currency: 'USD',
+        billing_interval: 'monthly',
+        benefits: [],
+        metadata: {},
+      },
+    })
+    const sdk = createClient(fn)
+
+    await sdk.memberships.createTier({
+      tierKey: 'pro',
+      name: 'Pro',
+      participantId: 'creator_1',
+      amountCents: 1900,
+      billingInterval: 'monthly',
+    })
+
+    expect(String(fn.mock.calls[0][0])).toContain('/memberships/tiers')
+    expect(JSON.parse(fn.mock.calls[0][1].body)).toMatchObject({
+      tier_key: 'pro',
+      participant_id: 'creator_1',
+      amount_cents: 1900,
+      billing_interval: 'monthly',
+    })
+
+    const createFn = mockFetch({ success: true, membership: { id: 'm_1' }, billing_cycle: { id: 'bc_1' }, checkout_session: { id: 'chk_1' } })
+    vi.stubGlobal('fetch', createFn)
+    await sdk.memberships.create({
+      tierKey: 'pro',
+      customerId: 'user_1',
+      successUrl: 'https://example.com/success',
+      idempotencyKey: 'mem_user_1_pro',
+    })
+    expect(String(createFn.mock.calls[0][0])).toContain('/memberships')
+    expect(JSON.parse(createFn.mock.calls[0][1].body)).toMatchObject({
+      tier_key: 'pro',
+      customer_id: 'user_1',
+      success_url: 'https://example.com/success',
+      idempotency_key: 'mem_user_1_pro',
+    })
+
+    const renewFn = mockFetch({ success: true, billing_cycle: { id: 'bc_2' }, checkout_session: { id: 'chk_2' } })
+    vi.stubGlobal('fetch', renewFn)
+    await sdk.memberships.renew('550e8400-e29b-41d4-a716-446655440001', {
+      successUrl: 'https://example.com/renewed',
+    })
+    expect(String(renewFn.mock.calls[0][0])).toContain('/memberships/550e8400-e29b-41d4-a716-446655440001/renew')
+
+    const cancelFn = mockFetch({ success: true, membership: { id: 'm_1' } })
+    vi.stubGlobal('fetch', cancelFn)
+    await sdk.memberships.cancel('550e8400-e29b-41d4-a716-446655440001', { cancelAtPeriodEnd: false, reason: 'requested' })
+    expect(String(cancelFn.mock.calls[0][0])).toContain('/memberships/550e8400-e29b-41d4-a716-446655440001/cancel')
+    expect(JSON.parse(cancelFn.mock.calls[0][1].body)).toMatchObject({
+      cancel_at_period_end: false,
+      reason: 'requested',
+    })
+
+    const entitlementFn = mockFetch({ success: true, entitlements: [{ membership_id: 'm_1', tier_id: 't_1', tier_key: 'pro', customer_id: 'user_1', active: true, benefits: [] }] })
+    vi.stubGlobal('fetch', entitlementFn)
+    const entitlements = await sdk.memberships.entitlements('user_1', 'pro')
+    expect(String(entitlementFn.mock.calls[0][0])).toContain('/memberships/entitlements')
+    expect(String(entitlementFn.mock.calls[0][0])).toContain('customer_id=user_1')
+    expect(entitlements.entitlements[0].active).toBe(true)
   })
 
   // === AUTH & REQUEST PLUMBING ===
@@ -406,6 +782,16 @@ describe('Soledgic SDK', () => {
 
     const [, opts] = fn.mock.calls[0]
     expect(opts.headers['Soledgic-Version']).toBe('2026-03-01')
+  })
+
+  it('sends SDK version telemetry headers', async () => {
+    const fn = mockFetch({ success: true, periods: [] })
+    const sdk = createClient(fn)
+    await sdk.listPeriods()
+
+    const [, opts] = fn.mock.calls[0]
+    expect(opts.headers['Soledgic-SDK']).toBe(`@soledgic/sdk/${SOLEDGIC_SDK_VERSION}`)
+    expect(opts.headers['Soledgic-SDK-Version']).toBe(SOLEDGIC_SDK_VERSION)
   })
 
   it('uses a configured Soledgic-Version header when provided', async () => {
@@ -601,7 +987,7 @@ describe('Soledgic SDK', () => {
     const sdk = createClient(fn)
     await expect(
       sdk.createCheckoutSession({ amount: 1000, participantId: 'c_1' } as any)
-    ).rejects.toThrow('Either paymentMethodId/sourceId or successUrl is required')
+    ).rejects.toThrow('Either paymentMethodId or successUrl is required')
     expect(fn).not.toHaveBeenCalled()
   })
 
@@ -613,7 +999,16 @@ describe('Soledgic SDK', () => {
         mode: 'session',
         checkout_url: 'https://pay.example.com',
         expires_at: '2026-01-01T00:00:00Z',
-        breakdown: { gross_amount: 100, creator_amount: 80, platform_amount: 20, creator_percent: 80 },
+        breakdown: {
+          gross_amount_cents: 10000,
+          subtotal_amount_cents: 9400,
+          sales_tax_amount_cents: 600,
+          sales_tax_state: 'MD',
+          creator_amount_cents: 8000,
+          platform_amount_cents: 2000,
+          soledgic_fee_cents: 350,
+          creator_percent: 80,
+        },
       },
     })
     const sdk = createClient(fn)
@@ -627,6 +1022,16 @@ describe('Soledgic SDK', () => {
       id: 'sess_1',
       mode: 'session',
       checkoutUrl: 'https://pay.example.com',
+      breakdown: {
+        grossAmountCents: 10000,
+        subtotalAmountCents: 9400,
+        salesTaxAmountCents: 600,
+        salesTaxState: 'MD',
+        creatorAmountCents: 8000,
+        platformAmountCents: 2000,
+        soledgicFeeCents: 350,
+        creatorPercent: 80,
+      },
     })
   })
 
@@ -844,10 +1249,10 @@ describe('Soledgic SDK', () => {
         transaction_id: 'txn_r1',
         reference_id: 'refund_1',
         sale_reference: 'order_1',
-        refunded_amount: 5000,
+        refunded_amount_cents: 5000,
         currency: 'USD',
         status: 'completed',
-        breakdown: { from_creator: 4000, from_platform: 1000 },
+        breakdown: { from_creator_cents: 4000, from_platform_cents: 1000 },
         is_full_refund: true,
       },
     })
@@ -858,9 +1263,9 @@ describe('Soledgic SDK', () => {
     })
 
     expect(result.refund.transactionId).toBe('txn_r1')
-    expect(result.refund.refundedAmount).toBe(5000)
-    expect(result.refund.breakdown?.fromCreator).toBe(4000)
-    expect(result.refund.breakdown?.fromPlatform).toBe(1000)
+    expect(result.refund.refundedAmountCents).toBe(5000)
+    expect(result.refund.breakdown?.fromCreatorCents).toBe(4000)
+    expect(result.refund.breakdown?.fromPlatformCents).toBe(1000)
     expect(result.refund.isFullRefund).toBe(true)
   })
 
@@ -874,7 +1279,7 @@ describe('Soledgic SDK', () => {
         transaction_id: null,
         reference_id: 'refund_pending_1',
         sale_reference: 'order_1',
-        refunded_amount: 30,
+        refunded_amount_cents: 30,
         currency: 'USD',
         status: 'pending_repair',
         reason: 'Returned',
@@ -912,14 +1317,14 @@ describe('Soledgic SDK', () => {
           transaction_id: 'txn_r1',
           reference_id: 'refund_1',
           sale_reference: 'order_1',
-          refunded_amount: 5000,
+          refunded_amount_cents: 5000,
           currency: 'USD',
           status: 'completed',
           reason: 'Returned',
           refund_from: 'both',
           external_refund_id: 'rf_ext_1',
           created_at: '2026-03-13T12:00:00Z',
-          breakdown: { from_creator: 4000, from_platform: 1000 },
+          breakdown: { from_creator_cents: 4000, from_platform_cents: 1000 },
         },
       ],
     })
@@ -933,7 +1338,7 @@ describe('Soledgic SDK', () => {
     expect(String(url)).toContain('limit=5')
     expect(result.count).toBe(1)
     expect(result.refunds[0].saleReference).toBe('order_1')
-    expect(result.refunds[0].breakdown?.fromPlatform).toBe(1000)
+    expect(result.refunds[0].breakdown?.fromPlatformCents).toBe(1000)
   })
 
   it('listRefunds preserves pending repair metadata', async () => {
@@ -946,7 +1351,7 @@ describe('Soledgic SDK', () => {
           transaction_id: null,
           reference_id: 'refund_pending_1',
           sale_reference: 'order_1',
-          refunded_amount: 30,
+          refunded_amount_cents: 30,
           currency: 'USD',
           status: 'pending_repair',
           reason: 'Returned',
@@ -1075,7 +1480,7 @@ describe('Soledgic SDK', () => {
         transaction_id: 'txn_refund_1',
         reference_id: 'refund_request_rr_1',
         sale_reference: 'order_1',
-        refunded_amount: 2999,
+        refunded_amount_cents: 2999,
         currency: 'USD',
         status: 'completed',
       },
@@ -1121,10 +1526,10 @@ describe('Soledgic SDK', () => {
       payout: {
         id: 'payout_1',
         transaction_id: 'txn_p1',
-        gross_amount: 5000,
-        fees: 0,
-        net_amount: 5000,
-        new_balance: 1000,
+        gross_amount_cents: 5000,
+        fees_cents: 0,
+        net_amount_cents: 5000,
+        new_balance_cents: 1000,
       },
     })
     const sdk = createClient(fn)
@@ -1143,7 +1548,7 @@ describe('Soledgic SDK', () => {
   })
 
   it('checkPayoutEligibility uses GET query parameters', async () => {
-    const fn = mockFetch({ success: true, eligible: true, creator_id: 'c_1', available_balance: 50 })
+    const fn = mockFetch({ success: true, eligibility: { participant_id: 'c_1', eligible: true, available_balance_cents: 50, issues: [], requirements: {} } })
     const sdk = createClient(fn)
     await sdk.checkPayoutEligibility('c_1')
 
@@ -1167,7 +1572,7 @@ describe('Soledgic SDK', () => {
           owner_type: 'customer',
           participant_id: null,
           account_type: 'user_wallet',
-          name: 'Reader Credits',
+          name: 'Reader Balance',
           currency: 'USD',
           status: 'active',
           balance: 2500,
@@ -1210,7 +1615,7 @@ describe('Soledgic SDK', () => {
         owner_type: 'customer',
         participant_id: null,
         account_type: 'user_wallet',
-        name: 'Reader Credits',
+        name: 'Reader Balance',
         currency: 'USD',
         status: 'active',
         balance: 0,
@@ -1228,7 +1633,7 @@ describe('Soledgic SDK', () => {
     const result = await sdk.createWallet({
       ownerId: 'reader_1',
       walletType: 'consumer_credit',
-      name: 'Reader Credits',
+      name: 'Reader Balance',
     })
 
     const body = JSON.parse(fn.mock.calls[0][1].body)
@@ -1317,10 +1722,10 @@ describe('Soledgic SDK', () => {
       payout: {
         id: 'payout_1',
         transaction_id: 'txn_p1',
-        gross_amount: 5000,
-        fees: 0,
-        net_amount: 5000,
-        new_balance: 1000,
+        gross_amount_cents: 5000,
+        fees_cents: 0,
+        net_amount_cents: 5000,
+        new_balance_cents: 1000,
       },
     })
     const sdk = createClient(fn)
@@ -1368,6 +1773,7 @@ describe('Soledgic SDK', () => {
       toAccountType: 'tax_reserve',
       amount: 2000,
       transferType: 'tax_reserve',
+      referenceId: 'xfer_test_1',
     })
 
     const body = JSON.parse(fn.mock.calls[0][1].body)
@@ -1640,6 +2046,10 @@ describe('Soledgic SDK', () => {
   it('testing helpers build signed sandbox webhooks and assert checkout payloads', async () => {
     expect(SOLEDGIC_SANDBOX_WEBHOOK_EVENTS).toContain('dispute.created')
     expect(SOLEDGIC_SANDBOX_WEBHOOK_EVENTS).toContain('hold.released')
+    expect(SOLEDGIC_SANDBOX_WEBHOOK_EVENTS).toContain('membership.activated')
+    expect(SOLEDGIC_SANDBOX_WEBHOOK_EVENTS).toContain('membership.expired')
+    expect(SOLEDGIC_SANDBOX_WEBHOOK_EVENTS).toContain('payout.processing')
+    expect(SOLEDGIC_SANDBOX_WEBHOOK_EVENTS).toContain('payout_request.completed')
 
     const metadata = buildSandboxRunMetadata({
       source: 'bridge_smoke',
@@ -1860,9 +2270,9 @@ describe('Soledgic SDK', () => {
           linked_user_id: '550e8400-e29b-41d4-a716-446655440000',
           name: 'Alice',
           tier: 'starter',
-          ledger_balance: 120,
-          held_amount: 20,
-          available_balance: 100,
+          ledger_balance_cents: 120,
+          held_amount_cents: 20,
+          available_balance_cents: 100,
         },
       ],
     })
@@ -1874,9 +2284,9 @@ describe('Soledgic SDK', () => {
       linkedUserId: '550e8400-e29b-41d4-a716-446655440000',
       name: 'Alice',
       tier: 'starter',
-      ledgerBalance: 120,
-      heldAmount: 20,
-      availableBalance: 100,
+      ledgerBalanceCents: 120,
+      heldAmountCents: 20,
+      availableBalanceCents: 100,
     })
   })
 
@@ -1923,9 +2333,9 @@ describe('Soledgic SDK', () => {
         name: 'Alice',
         tier: 'starter',
         custom_split_percent: 90,
-        ledger_balance: 120,
-        held_amount: 20,
-        available_balance: 100,
+        ledger_balance_cents: 120,
+        held_amount_cents: 20,
+        available_balance_cents: 100,
         holds: [],
       },
     })
@@ -3136,7 +3546,16 @@ describe('Soledgic SDK', () => {
 
   describe('generateFrozenStatements', () => {
     it('sends action: generate with period_id', async () => {
-      const fn = mockFetch({ success: true, statements: ['profit_loss', 'balance_sheet'] })
+      const fn = mockFetch({
+        success: true,
+        message: 'Frozen statements generated',
+        period_id: 'period_2026_01',
+        statements: {
+          trial_balance: { hash: 'h_tb', balanced: true },
+          profit_loss: { hash: 'h_pl', net_income: 1000 },
+          balance_sheet: { hash: 'h_bs', balanced: true },
+        },
+      })
       const sdk = createClient(fn)
       const result = await sdk.generateFrozenStatements('period_2026_01')
 
@@ -3192,7 +3611,7 @@ describe('Soledgic SDK', () => {
     it('sends action: list_tiers to manage-splits', async () => {
       const fn = mockFetch({
         success: true,
-        tiers: [
+        data: [
           { id: 'tier_1', name: 'Gold', creator_percent: 85, threshold: 10000 },
           { id: 'tier_2', name: 'Silver', creator_percent: 80, threshold: 0 },
         ],
@@ -3203,7 +3622,7 @@ describe('Soledgic SDK', () => {
       const body = JSON.parse(fn.mock.calls[0][1].body)
       expect(fn.mock.calls[0][0]).toContain('/manage-splits')
       expect(body.action).toBe('list_tiers')
-      expect(result.tiers).toHaveLength(2)
+      expect(result.data).toHaveLength(2)
     })
   })
 
@@ -3211,9 +3630,12 @@ describe('Soledgic SDK', () => {
     it('sends action: get_effective_split with creator_id', async () => {
       const fn = mockFetch({
         success: true,
-        creator_id: 'c_1',
-        effective_split: 85,
-        source: 'custom_override',
+        data: {
+          creator_id: 'c_1',
+          creator_percent: 85,
+          platform_percent: 15,
+          source: 'custom',
+        },
       })
       const sdk = createClient(fn)
       const result = await sdk.getEffectiveSplit('c_1')
@@ -3222,8 +3644,8 @@ describe('Soledgic SDK', () => {
       expect(fn.mock.calls[0][0]).toContain('/manage-splits')
       expect(body.action).toBe('get_effective_split')
       expect(body.creator_id).toBe('c_1')
-      expect(result.effective_split).toBe(85)
-      expect(result.source).toBe('custom_override')
+      expect(result.data.creator_percent).toBe(85)
+      expect(result.data.source).toBe('custom')
     })
   })
 
@@ -3248,9 +3670,13 @@ describe('Soledgic SDK', () => {
     it('sends action: get_templates to import-transactions', async () => {
       const fn = mockFetch({
         success: true,
-        templates: [
-          { id: 'tpl_1', name: 'Chase CSV', bank_name: 'Chase', format: 'csv' },
-        ],
+        data: {
+          builtin: [
+            { id: 'tpl_1', name: 'Chase CSV', bank_name: 'Chase', format: 'csv' },
+          ],
+          custom: [],
+          accounts: [],
+        },
       })
       const sdk = createClient(fn)
       const result = await sdk.getImportTemplates()
@@ -3258,8 +3684,8 @@ describe('Soledgic SDK', () => {
       const body = JSON.parse(fn.mock.calls[0][1].body)
       expect(fn.mock.calls[0][0]).toContain('/import-transactions')
       expect(body.action).toBe('get_templates')
-      expect(result.templates).toHaveLength(1)
-      expect(result.templates[0].name).toBe('Chase CSV')
+      expect(result.data.builtin).toHaveLength(1)
+      expect(result.data.builtin[0].name).toBe('Chase CSV')
     })
   })
 
@@ -3269,7 +3695,7 @@ describe('Soledgic SDK', () => {
         { date: '2026-01-15', description: 'Sale #1001', amount: 5000 },
         { date: '2026-01-16', description: 'Sale #1002', amount: 3000, reference: 'ref_1002' },
       ]
-      const fn = mockFetch({ success: true, imported: 2, skipped: 0 })
+      const fn = mockFetch({ success: true, data: { imported: 2, skipped: 0 } })
       const sdk = createClient(fn)
       const result = await sdk.importTransactions(transactions)
 
@@ -3280,11 +3706,11 @@ describe('Soledgic SDK', () => {
       expect(body.transactions[0].date).toBe('2026-01-15')
       expect(body.transactions[0].amount).toBe(5000)
       expect(body.transactions[1].reference).toBe('ref_1002')
-      expect(result.imported).toBe(2)
+      expect(result.data.imported).toBe(2)
     })
 
     it('sends empty array when no transactions', async () => {
-      const fn = mockFetch({ success: true, imported: 0, skipped: 0 })
+      const fn = mockFetch({ success: true, data: { imported: 0, skipped: 0 } })
       const sdk = createClient(fn)
       await sdk.importTransactions([])
 
@@ -3376,7 +3802,7 @@ describe('Soledgic SDK', () => {
       },
       {
         name: 'recordTransfer',
-        call: (sdk) => sdk.recordTransfer({ fromAccountType: 'cash', toAccountType: 'savings', amount: 500, transferType: 'operating' }),
+        call: (sdk) => sdk.recordTransfer({ fromAccountType: 'cash', toAccountType: 'savings', amount: 500, transferType: 'operating', referenceId: 'xfer_err_1' }),
         endpoint: 'record-transfer',
         bodyKeys: ['from_account_type', 'to_account_type', 'amount', 'transfer_type'],
       },
@@ -3684,6 +4110,7 @@ describe('Soledgic SDK', () => {
         expect(init.headers['x-api-key']).toBe(API_KEY)
         expect(init.headers['Content-Type']).toBe('application/json')
         expect(init.headers['Soledgic-Version']).toBeDefined()
+        expect(init.headers['Soledgic-SDK-Version']).toBe(SOLEDGIC_SDK_VERSION)
 
         // Verify snake_case body keys
         const body = JSON.parse(init.body)
@@ -3736,6 +4163,7 @@ describe('Soledgic SDK', () => {
         expect(init.method).toBe('GET')
         expect(init.headers['x-api-key']).toBe(API_KEY)
         expect(init.headers['Soledgic-Version']).toBeDefined()
+        expect(init.headers['Soledgic-SDK-Version']).toBe(SOLEDGIC_SDK_VERSION)
         // GET requests should not have a body
         expect(init.body).toBeUndefined()
       })
@@ -3850,7 +4278,17 @@ describe('Soledgic SDK', () => {
     it('releaseFunds maps nested release object', async () => {
       const fn = mockFetch({
         success: true,
-        release: { id: 'rel_1', hold_id: 'h_1', executed: true, transfer_id: 'tr_1', transfer_status: 'completed', amount: 5000, currency: 'USD' },
+        release: {
+          id: 'rel_1',
+          hold_id: 'h_1',
+          status: 'released',
+          availability_released: true,
+          executed: false,
+          transfer_id: null,
+          transfer_status: null,
+          amount: 5000,
+          currency: 'USD',
+        },
       })
       const sdk = createClient(fn)
       const result = await sdk.releaseFunds('entry_1')
@@ -3858,9 +4296,11 @@ describe('Soledgic SDK', () => {
       expect(result.success).toBe(true)
       expect(result.release_id).toBe('rel_1')
       expect(result.entry_id).toBe('h_1')
-      expect(result.executed).toBe(true)
-      expect(result.transfer_id).toBe('tr_1')
-      expect(result.transfer_status).toBe('completed')
+      expect(result.status).toBe('released')
+      expect(result.availability_released).toBe(true)
+      expect(result.executed).toBe(false)
+      expect(result.transfer_id).toBeNull()
+      expect(result.transfer_status).toBeNull()
       expect(result.amount).toBe(5000)
       expect(result.currency).toBe('USD')
     })
@@ -3879,14 +4319,14 @@ describe('Soledgic SDK', () => {
     it('checkPayoutEligibility maps eligibility fields', async () => {
       const fn = mockFetch({
         success: true,
-        eligibility: { participant_id: 'p_1', eligible: true, available_balance: 10000, issues: [], requirements: {} },
+        eligibility: { participant_id: 'p_1', eligible: true, available_balance_cents: 10000, issues: [], requirements: {} },
       })
       const sdk = createClient(fn)
       const result = await sdk.checkPayoutEligibility('p_1')
 
       expect(result.participant_id).toBe('p_1')
       expect(result.eligible).toBe(true)
-      expect(result.available_balance).toBe(10000)
+      expect(result.available_balance_cents).toBe(10000)
       expect(result.issues).toEqual([])
     })
 
@@ -3897,7 +4337,7 @@ describe('Soledgic SDK', () => {
 
       expect(result.participant_id).toBe('p_2') // falls back to input
       expect(result.eligible).toBe(false)
-      expect(result.available_balance).toBe(0)
+      expect(result.available_balance_cents).toBe(0)
       expect(result.issues).toEqual([])
     })
 
@@ -3910,7 +4350,17 @@ describe('Soledgic SDK', () => {
           requires_action: false, amount: 5000, currency: 'USD',
           expires_at: null,
           sale_reference: 'sale_pay_1',
-          breakdown: { gross_amount: 5000, creator_amount: 4000, platform_amount: 1000, creator_percent: 80 },
+          hold_id: 'entry_hold_1',
+          breakdown: {
+            gross_amount_cents: 5000,
+            subtotal_amount_cents: 5000,
+            sales_tax_amount_cents: 0,
+            sales_tax_state: null,
+            creator_amount_cents: 4000,
+            platform_amount_cents: 1000,
+            soledgic_fee_cents: 175,
+            creator_percent: 80,
+          },
         },
       })
       const sdk = createClient(fn)
@@ -3922,10 +4372,16 @@ describe('Soledgic SDK', () => {
       expect(result.checkoutSession.mode).toBe('direct')
       expect(result.checkoutSession.paymentId).toBe('pay_1')
       expect(result.checkoutSession.saleReference).toBe('sale_pay_1')
+      expect(result.checkoutSession.holdId).toBe('entry_hold_1')
+      expect(result.checkoutSession.paymentHoldId).toBe('entry_hold_1')
       expect(result.checkoutSession.requiresAction).toBe(false)
-      expect(result.checkoutSession.breakdown?.grossAmount).toBe(5000)
-      expect(result.checkoutSession.breakdown?.creatorAmount).toBe(4000)
-      expect(result.checkoutSession.breakdown?.platformAmount).toBe(1000)
+      expect(result.checkoutSession.breakdown?.grossAmountCents).toBe(5000)
+      expect(result.checkoutSession.breakdown?.subtotalAmountCents).toBe(5000)
+      expect(result.checkoutSession.breakdown?.salesTaxAmountCents).toBe(0)
+      expect(result.checkoutSession.breakdown?.salesTaxState).toBeNull()
+      expect(result.checkoutSession.breakdown?.creatorAmountCents).toBe(4000)
+      expect(result.checkoutSession.breakdown?.platformAmountCents).toBe(1000)
+      expect(result.checkoutSession.breakdown?.soledgicFeeCents).toBe(175)
       expect(result.checkoutSession.breakdown?.creatorPercent).toBe(80)
     })
 
@@ -3935,14 +4391,14 @@ describe('Soledgic SDK', () => {
         payout: {
           id: 'po_1',
           transaction_id: 'tx_1',
-          gross_amount: 10000,
-          fees: 250,
-          net_amount: 9750,
-          previous_balance: 15000,
-          new_balance: 5250,
-          payout_rail: 'processor',
-          processor_transfer_id: 'tr_1',
-          processor_transfer_status: 'processing',
+          gross_amount_cents: 10000,
+          fees_cents: 250,
+          net_amount_cents: 9750,
+          previous_balance_cents: 15000,
+          new_balance_cents: 5250,
+          payout_rail: 'bank_ach',
+          bank_transfer_id: 'bank_tx_1',
+          bank_transfer_status: 'pending',
         },
       })
       const sdk = createClient(fn)
@@ -3950,14 +4406,16 @@ describe('Soledgic SDK', () => {
 
       expect(result.payout.id).toBe('po_1')
       expect(result.payout.transactionId).toBe('tx_1')
-      expect(result.payout.grossAmount).toBe(10000)
-      expect(result.payout.fees).toBe(250)
-      expect(result.payout.netAmount).toBe(9750)
-      expect(result.payout.previousBalance).toBe(15000)
-      expect(result.payout.newBalance).toBe(5250)
-      expect(result.payout.payoutRail).toBe('processor')
-      expect(result.payout.processorTransferId).toBe('tr_1')
-      expect(result.payout.processorTransferStatus).toBe('processing')
+      expect(result.payout.grossAmountCents).toBe(10000)
+      expect(result.payout.feesCents).toBe(250)
+      expect(result.payout.netAmountCents).toBe(9750)
+      expect(result.payout.previousBalanceCents).toBe(15000)
+      expect(result.payout.newBalanceCents).toBe(5250)
+      expect(result.payout.payoutRail).toBe('bank_ach')
+      expect(result.payout.bankTransferId).toBe('bank_tx_1')
+      expect(result.payout.bankTransferStatus).toBe('pending')
+      expect(result.payout.processorTransferId).toBe('bank_tx_1')
+      expect(result.payout.processorTransferStatus).toBe('pending')
     })
 
     it('createRefund maps refund with breakdown', async () => {
@@ -3965,9 +4423,9 @@ describe('Soledgic SDK', () => {
         success: true,
         refund: {
           id: 'rf_1', transaction_id: 'tx_1', reference_id: 'ref_1',
-          sale_reference: 'sale_1', refunded_amount: 3000, currency: 'USD',
+          sale_reference: 'sale_1', refunded_amount_cents: 3000, currency: 'USD',
           status: 'completed', is_full_refund: true, repair_pending: false,
-          breakdown: { from_creator: 2400, from_platform: 600 },
+          breakdown: { from_creator_cents: 2400, from_platform_cents: 600 },
         },
         warning: 'partial reversal applied', warning_code: 'partial_reversal',
       })
@@ -3976,10 +4434,10 @@ describe('Soledgic SDK', () => {
 
       expect(result.refund.id).toBe('rf_1')
       expect(result.refund.transactionId).toBe('tx_1')
-      expect(result.refund.refundedAmount).toBe(3000)
+      expect(result.refund.refundedAmountCents).toBe(3000)
       expect(result.refund.isFullRefund).toBe(true)
-      expect(result.refund.breakdown?.fromCreator).toBe(2400)
-      expect(result.refund.breakdown?.fromPlatform).toBe(600)
+      expect(result.refund.breakdown?.fromCreatorCents).toBe(2400)
+      expect(result.refund.breakdown?.fromPlatformCents).toBe(600)
       expect(result.warning).toBe('partial reversal applied')
       expect(result.warningCode).toBe('partial_reversal')
     })
@@ -4045,7 +4503,7 @@ describe('Soledgic SDK', () => {
       expect(result.summaries[0].participantId).toBe('p1')
       expect(result.summaries[0].grossEarnings).toBe(50000)
       expect(result.summaries[0].requires1099).toBe(true)
-      expect(result.summaries[0].sharedTaxProfile?.legalName).toBe('John')
+      expect(result.summaries[0].sharedTaxProfile?.status).toBe('active')
       expect(result.totals.totalGross).toBe(50000)
       expect(result.totals.participantsRequiring1099).toBe(1)
     })
@@ -4088,8 +4546,8 @@ describe('Soledgic SDK', () => {
       const fn = mockFetch({
         success: true,
         participants: [
-          { id: 'p1', linked_user_id: 'u1', name: 'Alice', tier: 'gold', ledger_balance: 10000, held_amount: 500, available_balance: 9500 },
-          { id: 'p2', linked_user_id: null, name: null, tier: null, ledger_balance: 0, held_amount: 0, available_balance: 0 },
+          { id: 'p1', linked_user_id: 'u1', name: 'Alice', tier: 'gold', ledger_balance_cents: 10000, held_amount_cents: 500, available_balance_cents: 9500 },
+          { id: 'p2', linked_user_id: null, name: null, tier: null, ledger_balance_cents: 0, held_amount_cents: 0, available_balance_cents: 0 },
         ],
       })
       const sdk = createClient(fn)
@@ -4100,9 +4558,9 @@ describe('Soledgic SDK', () => {
       expect(result.participants[0].linkedUserId).toBe('u1')
       expect(result.participants[0].name).toBe('Alice')
       expect(result.participants[0].tier).toBe('gold')
-      expect(result.participants[0].ledgerBalance).toBe(10000)
-      expect(result.participants[0].heldAmount).toBe(500)
-      expect(result.participants[0].availableBalance).toBe(9500)
+      expect(result.participants[0].ledgerBalanceCents).toBe(10000)
+      expect(result.participants[0].heldAmountCents).toBe(500)
+      expect(result.participants[0].availableBalanceCents).toBe(9500)
       expect(result.participants[1].linkedUserId).toBeNull()
       expect(result.participants[1].name).toBeNull()
     })
@@ -4112,8 +4570,8 @@ describe('Soledgic SDK', () => {
         success: true,
         participant: {
           id: 'p1', linked_user_id: 'u1', name: 'Bob', tier: 'silver',
-          custom_split_percent: 75, ledger_balance: 8000, held_amount: 1000, available_balance: 7000,
-          holds: [{ amount: 500, reason: 'tax', release_date: '2026-03-01', status: 'held' }],
+          custom_split_percent: 75, ledger_balance_cents: 8000, held_amount_cents: 1000, available_balance_cents: 7000,
+          holds: [{ amount_cents: 500, reason: 'tax', release_date: '2026-03-01', status: 'held' }],
         },
       })
       const sdk = createClient(fn)
@@ -4122,7 +4580,7 @@ describe('Soledgic SDK', () => {
       expect(result.participant.id).toBe('p1')
       expect(result.participant.customSplitPercent).toBe(75)
       expect(result.participant.holds).toHaveLength(1)
-      expect(result.participant.holds[0].amount).toBe(500)
+      expect(result.participant.holds[0].amountCents).toBe(500)
       expect(result.participant.holds[0].reason).toBe('tax')
       expect(result.participant.holds[0].releaseDate).toBe('2026-03-01')
       expect(result.participant.holds[0].status).toBe('held')
@@ -4142,7 +4600,7 @@ describe('Soledgic SDK', () => {
     it('getParticipantPayoutEligibility maps eligibility with issues', async () => {
       const fn = mockFetch({
         success: true,
-        eligibility: { participant_id: 'p1', eligible: false, available_balance: 0, issues: ['no_bank_account', 'below_minimum'], requirements: { min_payout: 1000 } },
+        eligibility: { participant_id: 'p1', eligible: false, available_balance_cents: 0, issues: ['no_bank_account', 'below_minimum'], requirements: { min_payout: 1000 } },
       })
       const sdk = createClient(fn)
       const result = await sdk.getParticipantPayoutEligibility('p1')
@@ -4173,8 +4631,7 @@ describe('Soledgic SDK', () => {
       expect(result.calculation.requires1099).toBe(true)
       expect(result.calculation.threshold).toBe(600)
       expect(result.calculation.linkedUserId).toBe('u1')
-      expect(result.calculation.sharedTaxProfile?.legalName).toBe('Jane Doe')
-      expect(result.calculation.sharedTaxProfile?.taxIdLast4).toBe('4321')
+      expect(result.calculation.sharedTaxProfile?.status).toBe('active')
     })
 
     it('listRefunds maps refund array with breakdown', async () => {
@@ -4182,9 +4639,9 @@ describe('Soledgic SDK', () => {
         success: true, count: 1,
         refunds: [{
           id: 'r1', transaction_id: 'tx1', reference_id: 'ref1', sale_reference: 'sale1',
-          refunded_amount: 2000, currency: 'USD', status: 'completed', reason: 'defective',
+          refunded_amount_cents: 2000, currency: 'USD', status: 'completed', reason: 'defective',
           refund_from: 'both', external_refund_id: null, created_at: '2026-01-15',
-          breakdown: { from_creator: 1600, from_platform: 400 }, repair_pending: false, last_error: null,
+          breakdown: { from_creator_cents: 1600, from_platform_cents: 400 }, repair_pending: false, last_error: null,
         }],
       })
       const sdk = createClient(fn)
@@ -4194,11 +4651,11 @@ describe('Soledgic SDK', () => {
       expect(result.refunds).toHaveLength(1)
       expect(result.refunds[0].id).toBe('r1')
       expect(result.refunds[0].transactionId).toBe('tx1')
-      expect(result.refunds[0].refundedAmount).toBe(2000)
+      expect(result.refunds[0].refundedAmountCents).toBe(2000)
       expect(result.refunds[0].reason).toBe('defective')
       expect(result.refunds[0].refundFrom).toBe('both')
-      expect(result.refunds[0].breakdown?.fromCreator).toBe(1600)
-      expect(result.refunds[0].breakdown?.fromPlatform).toBe(400)
+      expect(result.refunds[0].breakdown?.fromCreatorCents).toBe(1600)
+      expect(result.refunds[0].breakdown?.fromPlatformCents).toBe(400)
       expect(result.refunds[0].repairPending).toBe(false)
     })
 
@@ -4459,7 +4916,7 @@ describe('Soledgic SDK', () => {
         wallet: { id: 'w_exist', wallet_type: 't', scope_type: 's', account_type: 'a', currency: 'USD', status: 'active', balance: 100, redeemable: false, transferable: false, topup_supported: false, payout_supported: false },
       })
       const sdk = createClient(fn)
-      const result = await sdk.createWallet({ ownerId: 'o1', walletType: 't' })
+      const result = await sdk.createWallet({ ownerId: 'o1', walletType: 'creator_earnings' })
 
       expect(result.created).toBe(false) // created === true check in code
       expect(result.wallet.id).toBe('w_exist')
@@ -4518,7 +4975,7 @@ describe('Soledgic SDK', () => {
         },
       })
       const sdk = createClient(fn)
-      const result = await sdk.topUpWallet({ walletId: 'w_dep', amount: 1000 })
+      const result = await sdk.topUpWallet({ walletId: 'w_dep', amount: 1000, referenceId: 'ref_dep' })
 
       expect(result.success).toBe(true)
       expect(result.walletId).toBe('w_dep')
@@ -4530,7 +4987,7 @@ describe('Soledgic SDK', () => {
     it('topUpWallet returns nulls when topup/deposit keys missing', async () => {
       const fn = mockFetch({ success: true })
       const sdk = createClient(fn)
-      const result = await sdk.topUpWallet({ walletId: 'w_empty', amount: 100 })
+      const result = await sdk.topUpWallet({ walletId: 'w_empty', amount: 100, referenceId: 'ref_empty' })
 
       expect(result.walletId).toBeNull()
       expect(result.ownerId).toBeNull()
@@ -4549,7 +5006,7 @@ describe('Soledgic SDK', () => {
         },
       })
       const sdk = createClient(fn)
-      const result = await sdk.withdrawFromWallet({ walletId: 'w_wd', amount: 500 })
+      const result = await sdk.withdrawFromWallet({ walletId: 'w_wd', amount: 500, referenceId: 'ref_wd' })
 
       expect(result.success).toBe(true)
       expect(result.walletId).toBe('w_wd')
@@ -4567,7 +5024,7 @@ describe('Soledgic SDK', () => {
         balance: 1000,
       })
       const sdk = createClient(fn)
-      const result = await sdk.withdrawFromWallet({ walletId: 'w_root', amount: 200 })
+      const result = await sdk.withdrawFromWallet({ walletId: 'w_root', amount: 200, referenceId: 'ref_root' })
 
       expect(result.walletId).toBe('w_root')
       expect(result.ownerId).toBe('o_root')
@@ -4589,6 +5046,7 @@ describe('Soledgic SDK', () => {
         fromParticipantId: 'from_p',
         toParticipantId: 'to_p',
         amount: 500,
+        referenceId: 'ref_xfer',
       })
 
       expect(result.success).toBe(true)
@@ -4611,6 +5069,7 @@ describe('Soledgic SDK', () => {
         fromParticipantId: 'a',
         toParticipantId: 'b',
         amount: 500,
+        referenceId: 'ref_xfer_root',
       })
 
       expect(result.transfer.transactionId).toBe('txn_root')
@@ -4708,9 +5167,11 @@ describe('Soledgic SDK', () => {
         release: {
           id: 'rel_1',
           hold_id: 'h_99',
-          executed: true,
-          transfer_id: 'xfr_1',
-          transfer_status: 'completed',
+          status: 'released',
+          availability_released: true,
+          executed: false,
+          transfer_id: null,
+          transfer_status: null,
           amount: 7500,
           currency: 'USD',
         },
@@ -4721,9 +5182,11 @@ describe('Soledgic SDK', () => {
       expect(result.success).toBe(true)
       expect(result.release.id).toBe('rel_1')
       expect(result.release.holdId).toBe('h_99')
-      expect(result.release.executed).toBe(true)
-      expect(result.release.transferId).toBe('xfr_1')
-      expect(result.release.transferStatus).toBe('completed')
+      expect(result.release.status).toBe('released')
+      expect(result.release.availabilityReleased).toBe(true)
+      expect(result.release.executed).toBe(false)
+      expect(result.release.transferId).toBeNull()
+      expect(result.release.transferStatus).toBeNull()
       expect(result.release.amount).toBe(7500)
       expect(result.release.currency).toBe('USD')
     })
@@ -4734,6 +5197,8 @@ describe('Soledgic SDK', () => {
       const result = await sdk.releaseHold({ holdId: 'h_empty' })
 
       expect(result.release.holdId).toBe('h_empty') // falls back to req.holdId
+      expect(result.release.status).toBeNull()
+      expect(result.release.availabilityReleased).toBe(false)
       expect(result.release.executed).toBe(false)
       expect(result.release.transferId).toBeNull()
       expect(result.release.transferStatus).toBeNull()
@@ -4746,9 +5211,11 @@ describe('Soledgic SDK', () => {
         success: true,
         id: 'rel_root',
         hold_id: 'h_root',
-        executed: true,
-        transfer_id: 'xfr_root',
-        transfer_status: 'pending',
+        status: 'released',
+        availability_released: true,
+        executed: false,
+        transfer_id: null,
+        transfer_status: null,
         amount: 1000,
         currency: 'EUR',
       })
@@ -4757,23 +5224,24 @@ describe('Soledgic SDK', () => {
 
       expect(result.release.id).toBe('rel_root')
       expect(result.release.holdId).toBe('h_root')
-      expect(result.release.executed).toBe(true)
-      expect(result.release.transferId).toBe('xfr_root')
+      expect(result.release.availabilityReleased).toBe(true)
+      expect(result.release.executed).toBe(false)
+      expect(result.release.transferId).toBeNull()
     })
 
-    it('releaseHold sends execute_transfer true by default', async () => {
+    it('releaseHold sends execute_transfer false by default', async () => {
       const fn = mockFetch({ success: true, release: { id: 'r1' } })
       const sdk = createClient(fn)
       await sdk.releaseHold({ holdId: 'h1' })
 
       const body = JSON.parse(fn.mock.calls[0][1].body)
-      expect(body.execute_transfer).toBe(true)
+      expect(body.execute_transfer).toBe(false)
     })
 
-    it('releaseHold sends execute_transfer false when explicitly set', async () => {
+    it('releaseHold ignores deprecated executeTransfer=true and still prevents a transfer', async () => {
       const fn = mockFetch({ success: true, release: { id: 'r1' } })
       const sdk = createClient(fn)
-      await sdk.releaseHold({ holdId: 'h1', executeTransfer: false })
+      await sdk.releaseHold({ holdId: 'h1', executeTransfer: true })
 
       const body = JSON.parse(fn.mock.calls[0][1].body)
       expect(body.execute_transfer).toBe(false)
@@ -5046,9 +5514,9 @@ describe('Soledgic SDK', () => {
           currency: 'USD',
           expires_at: '2026-04-01T00:00:00Z',
           breakdown: {
-            gross_amount: 2500,
-            creator_amount: 2000,
-            platform_amount: 500,
+            gross_amount_cents: 2500,
+            creator_amount_cents: 2000,
+            platform_amount_cents: 500,
             creator_percent: 80,
           },
         },
@@ -5076,9 +5544,9 @@ describe('Soledgic SDK', () => {
       expect(cs.currency).toBe('USD')
       expect(cs.expiresAt).toBe('2026-04-01T00:00:00Z')
       expect(cs.breakdown).not.toBeNull()
-      expect(cs.breakdown!.grossAmount).toBe(2500)
-      expect(cs.breakdown!.creatorAmount).toBe(2000)
-      expect(cs.breakdown!.platformAmount).toBe(500)
+      expect(cs.breakdown!.grossAmountCents).toBe(2500)
+      expect(cs.breakdown!.creatorAmountCents).toBe(2000)
+      expect(cs.breakdown!.platformAmountCents).toBe(500)
       expect(cs.breakdown!.creatorPercent).toBe(80)
     })
 
@@ -5099,6 +5567,7 @@ describe('Soledgic SDK', () => {
         amount: 1000,
         participantId: 'p_1',
         paymentMethodId: 'pm_1',
+        idempotencyKey: 'ik_t',
       })
 
       const cs = result.checkoutSession
@@ -5127,28 +5596,11 @@ describe('Soledgic SDK', () => {
         amount: 5000,
         participantId: 'p_1',
         paymentMethodId: 'pm_2',
+        idempotencyKey: 'ik_t2',
       })
 
       expect(result.checkoutSession.id).toBe('cs_root')
       expect(result.checkoutSession.requiresAction).toBe(true)
-    })
-
-    it('createCheckoutSession with sourceId sends source_id in body', async () => {
-      const fn = mockFetch({
-        success: true,
-        checkout_session: { id: 'cs_src', mode: 'direct', payment_id: 'pay_src', status: 'completed', requires_action: false },
-      })
-      const sdk = createClient(fn)
-      await sdk.createCheckoutSession({
-        amount: 1000,
-        participantId: 'p_1',
-        sourceId: 'src_1',
-        successUrl: 'https://example.com/ok',
-      } as any)
-
-      const body = JSON.parse(fn.mock.calls[0][1].body)
-      expect(body.source_id).toBe('src_1')
-      expect(body.success_url).toBe('https://example.com/ok')
     })
 
     // --- ALERT CRUD: createAlert and updateAlert with config mapping ---
@@ -5495,15 +5947,15 @@ describe('Soledgic SDK', () => {
         payout: { id: 'po_sparse', transaction_id: 'tx_sparse' },
       })
       const sdk = createClient(fn)
-      const result = await sdk.createPayout({ participantId: 'p_1', amount: 1000 })
+      const result = await sdk.createPayout({ participantId: 'p_1', amount: 1000, referenceId: 'ref_po_1k' })
 
       expect(result.payout.id).toBe('po_sparse')
       expect(result.payout.transactionId).toBe('tx_sparse')
-      expect(result.payout.grossAmount).toBeNull()
-      expect(result.payout.fees).toBeNull()
-      expect(result.payout.netAmount).toBeNull()
-      expect(result.payout.previousBalance).toBeNull()
-      expect(result.payout.newBalance).toBeNull()
+      expect(result.payout.grossAmountCents).toBeNull()
+      expect(result.payout.feesCents).toBeNull()
+      expect(result.payout.netAmountCents).toBeNull()
+      expect(result.payout.previousBalanceCents).toBeNull()
+      expect(result.payout.newBalanceCents).toBeNull()
     })
 
     it('createPayout falls back to response root when payout key missing', async () => {
@@ -5511,21 +5963,21 @@ describe('Soledgic SDK', () => {
         success: true,
         id: 'po_root',
         transaction_id: 'tx_root',
-        gross_amount: 5000,
-        fees: 100,
-        net_amount: 4900,
-        previous_balance: 10000,
-        new_balance: 5100,
+        gross_amount_cents: 5000,
+        fees_cents: 100,
+        net_amount_cents: 4900,
+        previous_balance_cents: 10000,
+        new_balance_cents: 5100,
       })
       const sdk = createClient(fn)
-      const result = await sdk.createPayout({ participantId: 'p_1', amount: 5000 })
+      const result = await sdk.createPayout({ participantId: 'p_1', amount: 5000, referenceId: 'ref_po_5k' })
 
       expect(result.payout.id).toBe('po_root')
-      expect(result.payout.grossAmount).toBe(5000)
-      expect(result.payout.fees).toBe(100)
-      expect(result.payout.netAmount).toBe(4900)
-      expect(result.payout.previousBalance).toBe(10000)
-      expect(result.payout.newBalance).toBe(5100)
+      expect(result.payout.grossAmountCents).toBe(5000)
+      expect(result.payout.feesCents).toBe(100)
+      expect(result.payout.netAmountCents).toBe(4900)
+      expect(result.payout.previousBalanceCents).toBe(10000)
+      expect(result.payout.newBalanceCents).toBe(5100)
     })
 
     // --- REFUND: null breakdown, missing fields ---
@@ -5538,7 +5990,7 @@ describe('Soledgic SDK', () => {
           transaction_id: 'tx_nb',
           reference_id: 'ref_nb',
           sale_reference: 'sale_nb',
-          refunded_amount: 1000,
+          refunded_amount_cents: 1000,
           currency: 'USD',
           status: 'completed',
           breakdown: null,
@@ -5905,7 +6357,7 @@ describe('Soledgic SDK', () => {
         success: true,
         policy: {
           id: 'fp_new',
-          type: 'amount_threshold',
+          type: 'budget_cap',
           severity: 'hard',
           priority: 1,
           is_active: false,
@@ -5916,7 +6368,7 @@ describe('Soledgic SDK', () => {
       })
       const sdk = createClient(fn)
       const result = await sdk.createFraudPolicy({
-        policyType: 'amount_threshold',
+        policyType: 'budget_cap',
         config: { max: 100000 },
         severity: 'hard',
         priority: 1,
@@ -6105,7 +6557,7 @@ describe('Soledgic SDK', () => {
 
       expect(result.eligibility.participantId).toBe('p_none')
       expect(result.eligibility.eligible).toBe(false)
-      expect(result.eligibility.availableBalance).toBe(0)
+      expect(result.eligibility.availableBalanceCents).toBe(0)
       expect(result.eligibility.issues).toEqual([])
       expect(result.eligibility.requirements).toEqual({})
     })
@@ -6116,18 +6568,18 @@ describe('Soledgic SDK', () => {
       const fn = mockFetch({
         success: true,
         participants: [
-          { ledger_balance: 100, held_amount: 10, available_balance: 90 },
-          { ledger_balance: 200, held_amount: 20, available_balance: 180 },
-          { ledger_balance: 0, held_amount: 0, available_balance: 0 },
+          { ledger_balance_cents: 100, held_amount_cents: 10, available_balance_cents: 90 },
+          { ledger_balance_cents: 200, held_amount_cents: 20, available_balance_cents: 180 },
+          { ledger_balance_cents: 0, held_amount_cents: 0, available_balance_cents: 0 },
         ],
       })
       const sdk = createClient(fn)
       const result = await sdk.getSummary()
 
       expect(result.success).toBe(true)
-      expect(result.data.total_ledger_balance).toBe(300)
-      expect(result.data.total_held_amount).toBe(30)
-      expect(result.data.total_available_balance).toBe(270)
+      expect(result.data.total_ledger_balance_cents).toBe(300)
+      expect(result.data.total_held_amount_cents).toBe(30)
+      expect(result.data.total_available_balance_cents).toBe(270)
       expect(result.data.participant_count).toBe(3)
     })
 
@@ -6136,9 +6588,9 @@ describe('Soledgic SDK', () => {
       const sdk = createClient(fn)
       const result = await sdk.getSummary()
 
-      expect(result.data.total_ledger_balance).toBe(0)
-      expect(result.data.total_held_amount).toBe(0)
-      expect(result.data.total_available_balance).toBe(0)
+      expect(result.data.total_ledger_balance_cents).toBe(0)
+      expect(result.data.total_held_amount_cents).toBe(0)
+      expect(result.data.total_available_balance_cents).toBe(0)
       expect(result.data.participant_count).toBe(0)
     })
 
@@ -6327,9 +6779,9 @@ describe('Soledgic SDK', () => {
         participant: {
           id: 'p_sparse',
           // all nullable fields missing
-          ledger_balance: 0,
-          held_amount: 0,
-          available_balance: 0,
+          ledger_balance_cents: 0,
+          held_amount_cents: 0,
+          available_balance_cents: 0,
           holds: [],
         },
       })
@@ -6348,11 +6800,11 @@ describe('Soledgic SDK', () => {
         success: true,
         participant: {
           id: 'p_holds',
-          ledger_balance: 100,
-          held_amount: 50,
-          available_balance: 50,
+          ledger_balance_cents: 100,
+          held_amount_cents: 50,
+          available_balance_cents: 50,
           holds: [
-            { amount: 50, status: 'held' },
+            { amount_cents: 50, status: 'held' },
           ],
         },
       })
@@ -6361,7 +6813,7 @@ describe('Soledgic SDK', () => {
 
       expect(result.participant.holds[0].reason).toBeNull()
       expect(result.participant.holds[0].releaseDate).toBeNull()
-      expect(result.participant.holds[0].amount).toBe(50)
+      expect(result.participant.holds[0].amountCents).toBe(50)
       expect(result.participant.holds[0].status).toBe('held')
     })
 
@@ -6831,7 +7283,7 @@ describe('Soledgic SDK', () => {
       })
       const sdk = createClient(fn)
       try {
-        await sdk.exportReport({ reportType: 'summary', format: 'csv' })
+        await sdk.exportReport({ reportType: 'transaction_detail', format: 'csv' })
         expect.unreachable('should throw')
       } catch (err: any) {
         expect(err).toBeInstanceOf(SoledgicError)
@@ -6850,7 +7302,7 @@ describe('Soledgic SDK', () => {
       })
       const sdk = createClient(fn)
       try {
-        await sdk.exportReport({ reportType: 'summary', format: 'csv' })
+        await sdk.exportReport({ reportType: 'transaction_detail', format: 'csv' })
         expect.unreachable('should throw')
       } catch (err: any) {
         expect(err).toBeInstanceOf(ValidationError)
@@ -6947,7 +7399,7 @@ describe('Soledgic SDK', () => {
       await expect(() => sdk.createCheckoutSession({
         amount: 1000,
         participantId: 'p_1',
-      } as any)).rejects.toThrow('Either paymentMethodId/sourceId or successUrl is required')
+      } as any)).rejects.toThrow('Either paymentMethodId or successUrl is required')
     })
 
     it('createCheckoutSession hasPaymentMethod is false when paymentMethodId is empty string', async () => {
@@ -6957,7 +7409,7 @@ describe('Soledgic SDK', () => {
         amount: 1000,
         participantId: 'p_1',
         paymentMethodId: '',
-      } as any)).rejects.toThrow('Either paymentMethodId/sourceId or successUrl is required')
+      } as any)).rejects.toThrow('Either paymentMethodId or successUrl is required')
     })
 
     // --- client.ts: checkPayoutEligibility Boolean() and defaults ---
@@ -6968,7 +7420,7 @@ describe('Soledgic SDK', () => {
         eligibility: {
           participant_id: 'p_ineligible',
           eligible: false,
-          available_balance: 0,
+          available_balance_cents: 0,
           issues: ['No bank account'],
           requirements: { bank_account: true },
         },
@@ -6977,7 +7429,7 @@ describe('Soledgic SDK', () => {
       const result = await sdk.checkPayoutEligibility('p_ineligible')
 
       expect(result.eligible).toBe(false)
-      expect(result.available_balance).toBe(0)
+      expect(result.available_balance_cents).toBe(0)
       expect(result.issues).toEqual(['No bank account'])
       expect(result.requirements).toEqual({ bank_account: true })
     })
@@ -6993,16 +7445,16 @@ describe('Soledgic SDK', () => {
             linked_user_id: 'u_1',
             name: 'Alice',
             tier: 'gold',
-            ledger_balance: 10000,
-            held_amount: 500,
-            available_balance: 9500,
+            ledger_balance_cents: 10000,
+            held_amount_cents: 500,
+            available_balance_cents: 9500,
           },
           {
             id: 'p_sparse',
             // all nullable fields missing
-            ledger_balance: 0,
-            held_amount: 0,
-            available_balance: 0,
+            ledger_balance_cents: 0,
+            held_amount_cents: 0,
+            available_balance_cents: 0,
           },
         ],
       })
@@ -7030,20 +7482,20 @@ describe('Soledgic SDK', () => {
             transaction_id: 'tx_rf1',
             reference_id: 'ref_rf1',
             sale_reference: 'sale_1',
-            refunded_amount: 5000,
+            refunded_amount_cents: 5000,
             currency: 'USD',
             status: 'completed',
             reason: 'Customer request',
             refund_from: 'platform',
             external_refund_id: 'ext_1',
             created_at: '2026-03-10',
-            breakdown: { from_creator: 3000, from_platform: 2000 },
+            breakdown: { from_creator_cents: 3000, from_platform_cents: 2000 },
             repair_pending: false,
             last_error: null,
           },
           {
             id: 'rf_2',
-            refunded_amount: 100,
+            refunded_amount_cents: 100,
             currency: 'EUR',
             status: 'pending',
             // all nullable fields missing
@@ -7061,8 +7513,8 @@ describe('Soledgic SDK', () => {
       expect(result.refunds[0].refundFrom).toBe('platform')
       expect(result.refunds[0].externalRefundId).toBe('ext_1')
       expect(result.refunds[0].createdAt).toBe('2026-03-10')
-      expect(result.refunds[0].breakdown!.fromCreator).toBe(3000)
-      expect(result.refunds[0].breakdown!.fromPlatform).toBe(2000)
+      expect(result.refunds[0].breakdown!.fromCreatorCents).toBe(3000)
+      expect(result.refunds[0].breakdown!.fromPlatformCents).toBe(2000)
       expect(result.refunds[0].repairPending).toBe(false)
       expect(result.refunds[0].lastError).toBeNull()
 
@@ -7081,7 +7533,7 @@ describe('Soledgic SDK', () => {
     it('listRefunds defaults count from array length when count missing', async () => {
       const fn = mockFetch({
         success: true,
-        refunds: [{ id: 'r1', refunded_amount: 100, currency: 'USD', status: 'done' }],
+        refunds: [{ id: 'r1', refunded_amount_cents: 100, currency: 'USD', status: 'done' }],
       })
       const sdk = createClient(fn)
       const result = await sdk.listRefunds()
@@ -7232,11 +7684,9 @@ describe('Soledgic SDK', () => {
       expect(result.calculation.linkedUserId).toBe('u_tax')
       expect(result.calculation.sharedTaxProfile).not.toBeNull()
       expect(result.calculation.sharedTaxProfile!.status).toBe('verified')
-      expect(result.calculation.sharedTaxProfile!.legalName).toBe('Test Corp LLC')
-      expect(result.calculation.sharedTaxProfile!.taxIdLast4).toBe('1234')
     })
 
-    it('calculateTaxForParticipant sharedTaxProfile null fallbacks in fields', async () => {
+    it('calculateTaxForParticipant maps sharedTaxProfile status-only', async () => {
       const fn = mockFetch({
         success: true,
         calculation: {
@@ -7256,8 +7706,7 @@ describe('Soledgic SDK', () => {
       const sdk = createClient(fn)
       const result = await sdk.calculateTaxForParticipant('p_tax2')
 
-      expect(result.calculation.sharedTaxProfile!.legalName).toBeNull()
-      expect(result.calculation.sharedTaxProfile!.taxIdLast4).toBeNull()
+      expect(result.calculation.sharedTaxProfile!.status).toBe('pending')
     })
 
     // --- client.ts: generateTaxSummary with sharedTaxProfile present ---
@@ -7295,12 +7744,10 @@ describe('Soledgic SDK', () => {
       expect(result.summaries[0].requires1099).toBe(true)
       expect(result.summaries[0].linkedUserId).toBe('u_1')
       expect(result.summaries[0].sharedTaxProfile!.status).toBe('verified')
-      expect(result.summaries[0].sharedTaxProfile!.legalName).toBe('Big Corp')
-      expect(result.summaries[0].sharedTaxProfile!.taxIdLast4).toBe('5678')
       expect(result.totals.participantsRequiring1099).toBe(1)
     })
 
-    it('generateTaxSummary sharedTaxProfile null legalName and taxIdLast4', async () => {
+    it('generateTaxSummary maps sharedTaxProfile status-only', async () => {
       const fn = mockFetch({
         success: true,
         tax_year: 2025,
@@ -7326,8 +7773,7 @@ describe('Soledgic SDK', () => {
       const sdk = createClient(fn)
       const result = await sdk.generateTaxSummary(2025)
 
-      expect(result.summaries[0].sharedTaxProfile!.legalName).toBeNull()
-      expect(result.summaries[0].sharedTaxProfile!.taxIdLast4).toBeNull()
+      expect(result.summaries[0].sharedTaxProfile!.status).toBe('pending')
     })
 
     // --- client.ts: createCheckoutSession Boolean(success) coercion ---
@@ -7349,6 +7795,7 @@ describe('Soledgic SDK', () => {
         amount: 1000,
         participantId: 'p_1',
         paymentMethodId: 'pm_1',
+        idempotencyKey: 'ik_t',
       })
 
       expect(result.success).toBe(true)
@@ -7374,6 +7821,7 @@ describe('Soledgic SDK', () => {
         amount: 1000,
         participantId: 'p_1',
         paymentMethodId: 'pm_1',
+        idempotencyKey: 'ik_t',
       })
 
       expect(result.checkoutSession.mode).toBe('direct')
@@ -7436,6 +7884,7 @@ describe('Soledgic SDK', () => {
         amount: 500,
         participantId: 'p_1',
         paymentMethodId: 'pm_fb',
+        idempotencyKey: 'ik_fb',
       })
 
       expect(result.checkoutSession.id).toBe('pay_fb')
@@ -7591,10 +8040,10 @@ describe('Soledgic SDK', () => {
         refund: {
           id: 'rf_bd',
           sale_reference: 'sale_bd',
-          refunded_amount: 5000,
+          refunded_amount_cents: 5000,
           currency: 'USD',
           status: 'completed',
-          breakdown: { from_creator: 3500, from_platform: 1500 },
+          breakdown: { from_creator_cents: 3500, from_platform_cents: 1500 },
           is_full_refund: true,
           repair_pending: false,
         },
@@ -7605,8 +8054,8 @@ describe('Soledgic SDK', () => {
       const result = await sdk.createRefund({ saleReference: 'sale_bd', reason: 'test' })
 
       expect(result.refund.breakdown).not.toBeNull()
-      expect(result.refund.breakdown!.fromCreator).toBe(3500)
-      expect(result.refund.breakdown!.fromPlatform).toBe(1500)
+      expect(result.refund.breakdown!.fromCreatorCents).toBe(3500)
+      expect(result.refund.breakdown!.fromPlatformCents).toBe(1500)
       expect(result.refund.isFullRefund).toBe(true)
       expect(result.refund.repairPending).toBe(false)
       expect(result.warning).toBe('Balance low')
@@ -7658,23 +8107,23 @@ describe('Soledgic SDK', () => {
         payout: {
           id: 'po_full',
           transaction_id: 'tx_full',
-          gross_amount: 10000,
-          fees: 200,
-          net_amount: 9800,
-          previous_balance: 25000,
-          new_balance: 15200,
+          gross_amount_cents: 10000,
+          fees_cents: 200,
+          net_amount_cents: 9800,
+          previous_balance_cents: 25000,
+          new_balance_cents: 15200,
         },
       })
       const sdk = createClient(fn)
-      const result = await sdk.createPayout({ participantId: 'p_1', amount: 10000 })
+      const result = await sdk.createPayout({ participantId: 'p_1', amount: 10000, referenceId: 'ref_po_10k' })
 
       expect(result.payout.id).toBe('po_full')
       expect(result.payout.transactionId).toBe('tx_full')
-      expect(result.payout.grossAmount).toBe(10000)
-      expect(result.payout.fees).toBe(200)
-      expect(result.payout.netAmount).toBe(9800)
-      expect(result.payout.previousBalance).toBe(25000)
-      expect(result.payout.newBalance).toBe(15200)
+      expect(result.payout.grossAmountCents).toBe(10000)
+      expect(result.payout.feesCents).toBe(200)
+      expect(result.payout.netAmountCents).toBe(9800)
+      expect(result.payout.previousBalanceCents).toBe(25000)
+      expect(result.payout.newBalanceCents).toBe(15200)
     })
 
     // --- client.ts: createReconciliationSnapshot ---
@@ -7806,7 +8255,7 @@ describe('Soledgic SDK', () => {
       await expect(sdk.createLedger({
         businessName: 'Test Biz',
         ownerEmail: 'owner@test.com',
-        ledgerMode: 'marketplace',
+        ledgerMode: 'standard',
       })).rejects.toMatchObject({
         status: 410,
         code: 'ENDPOINT_RETIRED',
@@ -8278,8 +8727,8 @@ describe('Soledgic SDK', () => {
       const fn = mockFetch({
         success: true,
         participants: [
-          { ledger_balance: null, held_amount: undefined, available_balance: '' },
-          { ledger_balance: '100', held_amount: 0, available_balance: 50 },
+          { ledger_balance_cents: null, held_amount_cents: undefined, available_balance_cents: '' },
+          { ledger_balance_cents: '100', held_amount_cents: 0, available_balance_cents: 50 },
         ],
       })
       const sdk = createClient(fn)
@@ -8287,38 +8736,10 @@ describe('Soledgic SDK', () => {
 
       // null || 0 = 0, undefined || 0 = 0, '' || 0 = 0
       // '100' || 0 = '100', Number('100') = 100
-      expect(result.data.total_ledger_balance).toBe(100)
-      expect(result.data.total_held_amount).toBe(0)
-      expect(result.data.total_available_balance).toBe(50)
+      expect(result.data.total_ledger_balance_cents).toBe(100)
+      expect(result.data.total_held_amount_cents).toBe(0)
+      expect(result.data.total_available_balance_cents).toBe(50)
       expect(result.data.participant_count).toBe(2)
-    })
-
-    // --- client.ts: createCheckoutSession paymentMethodId + sourceId logic ---
-
-    it('createCheckoutSession with sourceId (via paymentMethodId key present) passes validation', async () => {
-      // hasPaymentMethod checks: 'paymentMethodId' in req ? Boolean(req.paymentMethodId || req.sourceId)
-      // So paymentMethodId key must be present for sourceId to be checked
-      const fn = mockFetch({
-        success: true,
-        checkout_session: {
-          id: 'cs_src_via',
-          mode: 'direct',
-          payment_id: 'pay_src',
-          status: 'completed',
-          requires_action: false,
-          amount: 1000,
-        },
-      })
-      const sdk = createClient(fn)
-      const result = await sdk.createCheckoutSession({
-        amount: 1000,
-        participantId: 'p_1',
-        paymentMethodId: '', // falsy but key present
-        sourceId: 'src_1', // sourceId makes hasPaymentMethod true via ||
-        successUrl: 'https://example.com/ok', // also provide successUrl as fallback
-      } as any)
-
-      expect(result.checkoutSession.id).toBe('cs_src_via')
     })
 
     it('createCheckoutSession paymentIntentId falls back to payment_id', async () => {
@@ -8339,6 +8760,7 @@ describe('Soledgic SDK', () => {
         amount: 1000,
         participantId: 'p_1',
         paymentMethodId: 'pm_1',
+        idempotencyKey: 'ik_t',
       })
 
       // When both are present, payment_intent_id takes priority
@@ -8362,6 +8784,7 @@ describe('Soledgic SDK', () => {
         amount: 1000,
         participantId: 'p_1',
         paymentMethodId: 'pm_1',
+        idempotencyKey: 'ik_t',
       })
 
       expect(result.checkoutSession.requiresAction).toBe(true)
@@ -8384,6 +8807,7 @@ describe('Soledgic SDK', () => {
         amount: 7777,
         participantId: 'p_1',
         paymentMethodId: 'pm_1',
+        idempotencyKey: 'ik_t',
       })
 
       expect(result.checkoutSession.amount).toBe(7777)
@@ -8427,7 +8851,7 @@ describe('Soledgic SDK', () => {
         wallet: { id: 'w1', wallet_type: 't', scope_type: 's', account_type: 'a', currency: 'USD', status: 'active', balance: 0, redeemable: false, transferable: false, topup_supported: false, payout_supported: false },
       })
       const sdk1 = createClient(fn1)
-      const result1 = await sdk1.createWallet({ ownerId: 'o1', walletType: 't' })
+      const result1 = await sdk1.createWallet({ ownerId: 'o1', walletType: 'creator_earnings' })
       expect(result1.created).toBe(false) // 1 === true is false
 
       const fn2 = mockFetch({
@@ -8436,7 +8860,7 @@ describe('Soledgic SDK', () => {
         wallet: { id: 'w2', wallet_type: 't', scope_type: 's', account_type: 'a', currency: 'USD', status: 'active', balance: 0, redeemable: false, transferable: false, topup_supported: false, payout_supported: false },
       })
       const sdk2 = createClient(fn2)
-      const result2 = await sdk2.createWallet({ ownerId: 'o2', walletType: 't' })
+      const result2 = await sdk2.createWallet({ ownerId: 'o2', walletType: 'creator_earnings' })
       expect(result2.created).toBe(true)
     })
 
@@ -8505,6 +8929,7 @@ describe('Soledgic SDK', () => {
       const sdk = createClient(fn)
       await sdk.projectIntent({
         authorizingInstrumentId: 'inst_h',
+        untilDate: '2026-12-31',
         horizonCount: 3,
       })
 
@@ -8778,7 +9203,7 @@ describe('Soledgic SDK', () => {
       const sdk = createClient(fn)
       await sdk.recordOpeningBalance({
         asOfDate: '2026-01-01',
-        source: 'import',
+        source: 'imported',
         sourceDescription: 'Migrated from QuickBooks',
         balances: [
           { accountType: 'cash', entityId: 'checking_1', balance: 50000 },
@@ -8914,18 +9339,18 @@ describe('Soledgic SDK', () => {
     it('createFraudPolicy sends severity and priority', async () => {
       const fn = mockFetch({
         success: true,
-        policy: { id: 'fp_x', type: 'velocity', severity: 'soft', priority: 5, is_active: true, config: {}, created_at: null, updated_at: null },
+        policy: { id: 'fp_x', type: 'projection_guard', severity: 'soft', priority: 5, is_active: true, config: {}, created_at: null, updated_at: null },
       })
       const sdk = createClient(fn)
       await sdk.createFraudPolicy({
-        policyType: 'velocity',
+        policyType: 'projection_guard',
         config: { max_per_hour: 100 },
         severity: 'soft',
         priority: 5,
       })
 
       const body = JSON.parse(fn.mock.calls[0][1].body)
-      expect(body.policy_type).toBe('velocity')
+      expect(body.policy_type).toBe('projection_guard')
       expect(body.severity).toBe('soft')
       expect(body.priority).toBe(5)
       expect(body.config).toEqual({ max_per_hour: 100 })
@@ -8967,21 +9392,21 @@ describe('Soledgic SDK', () => {
     it('createRefund maps all optional request fields', async () => {
       const fn = mockFetch({
         success: true,
-        refund: { id: 'rf_req', sale_reference: 'sale_x', refunded_amount: 1000, currency: 'USD', status: 'completed' },
+        refund: { id: 'rf_req', sale_reference: 'sale_x', refunded_amount_cents: 1000, currency: 'USD', status: 'completed' },
       })
       const sdk = createClient(fn)
       await sdk.createRefund({
         saleReference: 'sale_x',
         reason: 'Damaged',
         amount: 1000,
-        refundFrom: 'creator',
+        refundFrom: 'creator_only',
         externalRefundId: 'ext_rf_1',
         idempotencyKey: 'ik_rf',
         metadata: { category: 'returns' },
       })
 
       const body = JSON.parse(fn.mock.calls[0][1].body)
-      expect(body.refund_from).toBe('creator')
+      expect(body.refund_from).toBe('creator_only')
       expect(body.external_refund_id).toBe('ext_rf_1')
       expect(body.idempotency_key).toBe('ik_rf')
       expect(body.mode).toBeUndefined()
@@ -9007,6 +9432,7 @@ describe('Soledgic SDK', () => {
         customerId: 'cust_cs',
         buyerUserId: 'buyer_cs',
         purchaseMode: 'direct_funded_wallet',
+        holdFunds: true,
         sandboxCheckoutProvider: 'stripe',
         successUrl: 'https://example.com/ok',
         cancelUrl: 'https://example.com/cancel',
@@ -9021,6 +9447,7 @@ describe('Soledgic SDK', () => {
       expect(body.customer_id).toBe('cust_cs')
       expect(body.buyer_user_id).toBe('buyer_cs')
       expect(body.purchase_mode).toBe('direct_funded_wallet')
+      expect(body.hold_funds).toBe(true)
       expect(body.sandbox_checkout_provider).toBe('stripe')
       expect(body.cancel_url).toBe('https://example.com/cancel')
       expect(body.metadata).toEqual({ plan: 'premium' })
@@ -9097,14 +9524,14 @@ describe('Soledgic SDK', () => {
         participantId: 'part_1',
         ownerType: 'customer',
         walletType: 'consumer_credit',
-        name: 'Store Credits',
+        name: 'Stored Balance',
         metadata: { tier: 'gold' },
       })
 
       const body = JSON.parse(fn.mock.calls[0][1].body)
       expect(body.participant_id).toBe('part_1')
       expect(body.owner_type).toBe('customer')
-      expect(body.name).toBe('Store Credits')
+      expect(body.name).toBe('Stored Balance')
       expect(body.metadata).toEqual({ tier: 'gold' })
     })
 
@@ -9524,11 +9951,11 @@ describe('Soledgic SDK', () => {
     // --- client.ts: exportReport JSON path ---
 
     it('exportReport with json format returns full response', async () => {
-      const fn = mockFetch({ success: true, report_type: 'summary', data: [], row_count: 0 })
+      const fn = mockFetch({ success: true, report_type: 'transaction_detail', data: [], row_count: 0 })
       const sdk = createClient(fn)
-      const result = await sdk.exportReport({ reportType: 'summary', format: 'json', startDate: '2026-01-01', endDate: '2026-03-31', creatorId: 'c_1' })
+      const result = await sdk.exportReport({ reportType: 'transaction_detail', format: 'json', startDate: '2026-01-01', endDate: '2026-03-31', creatorId: 'c_1' })
 
-      expect(result).toMatchObject({ success: true, report_type: 'summary' })
+      expect(result).toMatchObject({ success: true, report_type: 'transaction_detail' })
     })
 
     // --- client.ts: createCheckoutSession checkout_url null path ---

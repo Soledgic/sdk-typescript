@@ -70,6 +70,17 @@ import type {
   GetWalletResponse,
   WalletEntriesResponse,
   WalletTopupRequest,
+  SharedWalletSpendRequest,
+  SharedWalletSpendResponse,
+  SharedWalletHoldRequest,
+  SharedWalletHoldResponse,
+  SharedWalletHoldActionRequest,
+  SharedWalletReleaseResponse,
+  SharedWalletRefundResponse,
+  SharedWalletSpendReverseRequest,
+  SharedWalletSpendReverseResponse,
+  SharedWalletAuthorizationRevokeRequest,
+  SharedWalletAuthorizationRevokeResponse,
   WalletTopupResponse,
   WalletWithdrawRequest,
   WalletWithdrawalResponse,
@@ -80,6 +91,11 @@ import type {
   HeldFundsSummaryResponse,
   ReleaseHoldRequest,
   ReleaseHoldResponse,
+  MembershipEntitlementsResponse,
+  MembershipResponse,
+  MembershipTier,
+  CreateMembershipRequest,
+  CreateMembershipTierRequest,
   CreateCheckoutSessionRequest,
   CheckoutSessionResourceResponse,
   CreateWalletSessionRequest,
@@ -113,6 +129,7 @@ import type {
   UpsertCreatorRequest,
   CreateCreatorWalletRequest,
   UniversalCheckoutRequest,
+  CreateWalletFundedCheckoutRequest,
   PreflightAuthorizationRequest,
   PreflightAuthorizationResponse,
   CreateAlertRequest,
@@ -146,6 +163,7 @@ import { buildSandboxScenarioPayload } from './testing'
 
 export const DEFAULT_API_VERSION = '2026-03-01'
 export const DEFAULT_BASE_URL = 'https://api.soledgic.com/v1'
+export const SOLEDGIC_SDK_VERSION = '0.7.1'
 const API_KEY_PATTERN = /^slk_(test|live)_[A-Za-z0-9]{16,}$/
 
 export function normalizeBaseUrl(input?: string): string {
@@ -325,11 +343,11 @@ export class Soledgic {
   /**
    * Consumer/buyer wallet management.
    *
-   * `consumer_credit` wallets hold platform credits a buyer can spend at checkout.
+   * `consumer_credit` wallets hold buyer stored balances for wallet-funded checkout.
    * Use `users.upsertWallet` on signup or first login — it is safe to call multiple times.
    *
-   * @useCase Closed-Loop Consumer Wallet
-   * @intent Issue spendable platform credits to buyers inside a closed-loop economy
+   * @useCase Consumer Stored Balance Wallet
+   * @intent Provision wallet-funded checkout balances for buyers
    *
    * @example
    * const { wallet } = await client.users.upsertWallet({
@@ -444,6 +462,13 @@ export class Soledgic {
      * // Redirect buyer to session.checkoutSession.checkoutUrl
      */
     createCheckout: (req: UniversalCheckoutRequest) => this.createUniversalCheckout(req),
+
+    /**
+     * Create a hosted checkout that funds and spends the authenticated buyer's
+     * wallet atomically. Alias for `purchases.createWalletFundedCheckout`.
+     */
+    createWalletFundedCheckout: (req: CreateWalletFundedCheckoutRequest) =>
+      this.createWalletFundedHostedCheckout(req),
   }
 
   /**
@@ -473,6 +498,34 @@ export class Soledgic {
      * Use `externalOrderId` as your idempotency key — safe to retry.
      */
     create: (req: UniversalCheckoutRequest) => this.createUniversalCheckout(req),
+
+    /**
+     * Create a buyer-funded hosted checkout without entering merchant onboarding.
+     * The buyer id and success URL are required; the SDK sets the canonical
+     * `direct_funded_wallet` purchase mode automatically.
+     */
+    createWalletFundedCheckout: (req: CreateWalletFundedCheckoutRequest) =>
+      this.createWalletFundedHostedCheckout(req),
+  }
+
+  /**
+   * Membership tiers and subscriber lifecycle for creator communities.
+   *
+   * Memberships use checkout sessions for payment, then activate entitlements only
+   * after the checkout sale is recorded in the ledger.
+   */
+  readonly memberships = {
+    createTier: (req: CreateMembershipTierRequest) => this.createMembershipTier(req),
+    listTiers: () => this.listMembershipTiers(),
+    create: (req: CreateMembershipRequest) => this.createMembership(req),
+    list: (customerId?: string) => this.listMemberships(customerId),
+    get: (membershipId: string) => this.getMembership(membershipId),
+    renew: (membershipId: string, req: Omit<CreateMembershipRequest, 'tierId' | 'tierKey' | 'customerId'>) =>
+      this.renewMembership(membershipId, req),
+    cancel: (membershipId: string, options?: { cancelAtPeriodEnd?: boolean; reason?: string }) =>
+      this.cancelMembership(membershipId, options),
+    resume: (membershipId: string) => this.resumeMembership(membershipId),
+    entitlements: (customerId: string, tierKey?: string) => this.getMembershipEntitlements(customerId, tierKey),
   }
 
   /**
@@ -523,7 +576,7 @@ export class Soledgic {
    *
    * Wallets are the core balance primitive in Soledgic. Each participant can have
    * multiple wallets by type: `creator_earnings` holds payout-eligible creator revenue;
-   * `consumer_credit` holds spendable buyer credits.
+   * `consumer_credit` holds buyer stored balance.
    *
    * @useCase Check Creator Earnings Balance
    * @intent Read real-time ledger balance before requesting a payout or displaying creator dashboard data
@@ -543,7 +596,7 @@ export class Soledgic {
     /**
      * List wallets with optional filtering by owner, type, or participant.
      * Use `walletType: 'creator_earnings'` to get creator balance wallets,
-     * or `walletType: 'consumer_credit'` for buyer credit wallets.
+     * or `walletType: 'consumer_credit'` for buyer stored-balance wallets.
      */
     list: (filters?: ListWalletsRequest) => this.listWallets(filters),
 
@@ -559,7 +612,7 @@ export class Soledgic {
      */
     listActivity: (walletId: string, options?: { limit?: number; offset?: number }) => this.getWalletEntries(walletId, options),
 
-    /** Add funds to a wallet directly (platform-initiated credit, not a buyer payment). */
+    /** Add funds to a wallet directly (platform-initiated balance adjustment, not a buyer payment). */
     topUp: (req: WalletTopupRequest) => this.topUpWallet(req),
 
     /** Debit funds from a wallet (platform-initiated). */
@@ -573,9 +626,49 @@ export class Soledgic {
 
     /**
      * Create a hosted payment page that lets a buyer fund their own wallet.
-     * Useful for pre-loading credits before a purchase.
+     * Useful for pre-loading a buyer wallet before a purchase.
      */
     createHostedSession: (req: CreateWalletSessionRequest) => this.createWalletSession(req),
+
+    /**
+     * Charge a buyer's shared Soledgic balance for a purchase on your platform
+     * (cross-platform / closed-loop wallet). The buyer is identified by their
+     * Soledgic OIDC subject (`consumerSub`) and must have authorized your platform
+     * to spend from their balance (granted at "Sign in with Soledgic"). The split
+     * posts on your ledger; funds are debited from the buyer's shared balance.
+     *
+     * @useCase Spend a buyer's portable Soledgic balance
+     */
+    sharedSpend: (req: SharedWalletSpendRequest) => this.spendSharedWallet(req),
+    /**
+     * Refund a completed shared-wallet spend (immediate-settled purchase). The
+     * buyer is made whole; the creator's share is clawed back (their balance may
+     * go negative, recovered from future earnings).
+     *
+     * @useCase Refund a buyer paid from their portable Soledgic balance
+     */
+    reverseSharedSpend: (req: SharedWalletSpendReverseRequest) => this.reverseSharedWalletSpend(req),
+    /**
+     * Platform "disconnect": revoke THIS platform's standing authorization to spend
+     * a consumer's shared Soledgic balance. Scoped to the calling platform — it can
+     * only ever revoke access to itself. Idempotent (`revoked:false` if nothing was active).
+     *
+     * @useCase Stop being able to charge a buyer's portable balance when they unlink
+     */
+    revokeSharedSpendAuthorization: (req: SharedWalletAuthorizationRevokeRequest) => this.revokeSharedSpendAuthorization(req),
+    /**
+     * Place an ESCROW hold against a buyer's shared Soledgic balance for a
+     * delivery/escrow purchase. Funds leave the buyer's balance into escrow; the
+     * creator is paid only when you call `releaseSharedHold`. Refund a still-held
+     * hold with `refundSharedHold`. Use `sharedSpend` for immediate settlement.
+     *
+     * @useCase Escrow a buyer's portable Soledgic balance for an order
+     */
+    sharedHold: (req: SharedWalletHoldRequest) => this.holdSharedWallet(req),
+    /** Release a previously placed shared-wallet escrow hold to the creator. */
+    releaseSharedHold: (req: SharedWalletHoldActionRequest) => this.releaseSharedWalletHold(req),
+    /** Refund a still-held shared-wallet escrow hold back to the buyer's balance. */
+    refundSharedHold: (req: SharedWalletHoldActionRequest) => this.refundSharedWalletHold(req),
   }
 
   /**
@@ -602,7 +695,7 @@ export class Soledgic {
    * if (eligibility.eligible) {
    *   await client.payouts.request({
    *     participantId: 'creator_maya',
-   *     amount: eligibility.availableBalance,
+   *     amount: eligibility.availableBalanceCents,
    *     referenceId: `payout_${Date.now()}`,
    *   });
    * }
@@ -744,8 +837,8 @@ export class Soledgic {
     list: (options?: HoldQueryOptions) => this.listHolds(options),
 
     /**
-     * Release a hold, making the held funds available for payout or transfer.
-     * Use after delivery confirmation, dispute window expiry, or manual approval.
+     * Release a hold, making the held funds available. This never sends money
+     * to a bank; create a payout separately after the release.
      */
     release: (req: ReleaseHoldRequest) => this.releaseHold(req),
   }
@@ -832,17 +925,23 @@ export class Soledgic {
     }
   }
 
+  private requestHeaders(contentType?: string): Record<string, string> {
+    return {
+      'x-api-key': this._getKey(),
+      ...(contentType ? { 'Content-Type': contentType } : {}),
+      'Soledgic-Version': this.apiVersion,
+      'Soledgic-SDK': `@soledgic/sdk/${SOLEDGIC_SDK_VERSION}`,
+      'Soledgic-SDK-Version': SOLEDGIC_SDK_VERSION,
+    }
+  }
+
   private async request<T>(endpoint: string, body: any): Promise<T> {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
     try {
       const response = await fetch(`${this.baseUrl}/${endpoint}`, {
         method: 'POST',
-        headers: {
-          'x-api-key': this._getKey(),
-          'Content-Type': 'application/json',
-          'Soledgic-Version': this.apiVersion,
-        },
+        headers: this.requestHeaders('application/json'),
         body: JSON.stringify(body),
         signal: controller.signal,
       })
@@ -873,10 +972,7 @@ export class Soledgic {
     try {
       const response = await fetch(url.toString(), {
         method: 'GET',
-        headers: {
-          'x-api-key': this._getKey(),
-          'Soledgic-Version': this.apiVersion,
-        },
+        headers: this.requestHeaders(),
         signal: controller.signal,
       })
       const data = await response.json()
@@ -899,11 +995,7 @@ export class Soledgic {
     try {
       const response = await fetch(`${this.baseUrl}/${endpoint}`, {
         method: 'POST',
-        headers: {
-          'x-api-key': this._getKey(),
-          'Content-Type': 'application/json',
-          'Soledgic-Version': this.apiVersion,
-        },
+        headers: this.requestHeaders('application/json'),
         body: JSON.stringify(body),
         signal: controller.signal,
       })
@@ -931,16 +1023,29 @@ export class Soledgic {
       ...(req.externalUserId ? { external_user_id: req.externalUserId } : {}),
     }
 
+    // Untyped (plain JS) callers sometimes pass the canonical
+    // createCheckoutSession keys instead of the universal aliases. The spread
+    // carries those through — never clobber them with an undefined alias.
+    const canonical = req as Partial<CreateCheckoutSessionRequest>
     const checkoutReq: CreateCheckoutSessionRequest = {
       ...req,
-      participantId: req.creatorId,
-      productId: req.externalProductId,
-      customerId: req.externalUserId,
+      participantId: req.creatorId ?? canonical.participantId,
+      productId: req.externalProductId ?? canonical.productId,
+      customerId: req.externalUserId ?? canonical.customerId,
       idempotencyKey: 'idempotencyKey' in req ? req.idempotencyKey || req.externalOrderId : req.externalOrderId,
       metadata,
     } as CreateCheckoutSessionRequest
 
     return this.createCheckoutSession(checkoutReq)
+  }
+
+  private createWalletFundedHostedCheckout(
+    req: CreateWalletFundedCheckoutRequest,
+  ): Promise<CheckoutSessionResourceResponse> {
+    return this.createUniversalCheckout({
+      ...req,
+      purchaseMode: 'direct_funded_wallet',
+    })
   }
 
   private async requestGetRaw(endpoint: string, params?: Record<string, string | number | boolean | undefined>): Promise<Response> {
@@ -955,10 +1060,7 @@ export class Soledgic {
     try {
       const response = await fetch(url.toString(), {
         method: 'GET',
-        headers: {
-          'x-api-key': this._getKey(),
-          'Soledgic-Version': this.apiVersion,
-        },
+        headers: this.requestHeaders(),
         signal: controller.signal,
       })
       if (!response.ok) {
@@ -983,10 +1085,7 @@ export class Soledgic {
     try {
       const response = await fetch(`${this.baseUrl}/${endpoint}`, {
         method: 'DELETE',
-        headers: {
-          'x-api-key': this._getKey(),
-          'Soledgic-Version': this.apiVersion,
-        },
+        headers: this.requestHeaders(),
         signal: controller.signal,
       })
       const data = await response.json()
@@ -1233,7 +1332,16 @@ export class Soledgic {
 
   // === FROZEN STATEMENTS ===
 
-  async generateFrozenStatements(periodId: string) {
+  async generateFrozenStatements(periodId: string): Promise<{
+    success: boolean
+    message?: string
+    period_id?: string
+    statements?: {
+      trial_balance: { hash: string; balanced: boolean }
+      profit_loss: { hash: string; net_income: number }
+      balance_sheet: { hash: string; balanced: boolean }
+    }
+  }> {
     return this.request('frozen-statements', {
       action: 'generate',
       period_id: periodId,
@@ -1264,19 +1372,25 @@ export class Soledgic {
 
   // === SPLITS MANAGEMENT ===
 
-  async listTiers() {
+  async listTiers(): Promise<{ success: boolean; data: Array<Record<string, unknown>> }> {
     return this.request('manage-splits', { action: 'list_tiers' })
   }
 
-  async getEffectiveSplit(creatorId: string) {
+  async getEffectiveSplit(creatorId: string): Promise<{
+    success: boolean
+    data: { creator_id: string; creator_percent: number; platform_percent: number; source: string }
+  }> {
     return this.request('manage-splits', { action: 'get_effective_split', creator_id: creatorId })
   }
 
-  async setCreatorSplit(creatorId: string, splitPercent: number) {
+  async setCreatorSplit(creatorId: string, splitPercent: number): Promise<{
+    success: boolean
+    data?: { creator_id: string; creator_percent: number; platform_percent: number }
+  }> {
     return this.request('manage-splits', { action: 'set_creator_split', creator_id: creatorId, split_percent: splitPercent })
   }
 
-  async clearCreatorSplit(creatorId: string) {
+  async clearCreatorSplit(creatorId: string): Promise<{ success: boolean }> {
     return this.request('manage-splits', { action: 'clear_creator_split', creator_id: creatorId })
   }
 
@@ -1288,13 +1402,13 @@ export class Soledgic {
     const response = await this.requestGet<any>('participants')
     const participants = Array.isArray(response.participants) ? response.participants : []
     const summary = participants.reduce((totals: Record<string, number>, participant: any) => ({
-      total_ledger_balance: totals.total_ledger_balance + Number(participant.ledger_balance || 0),
-      total_held_amount: totals.total_held_amount + Number(participant.held_amount || 0),
-      total_available_balance: totals.total_available_balance + Number(participant.available_balance || 0),
+      total_ledger_balance_cents: totals.total_ledger_balance_cents + Number(participant.ledger_balance_cents || 0),
+      total_held_amount_cents: totals.total_held_amount_cents + Number(participant.held_amount_cents || 0),
+      total_available_balance_cents: totals.total_available_balance_cents + Number(participant.available_balance_cents || 0),
     }), {
-      total_ledger_balance: 0,
-      total_held_amount: 0,
-      total_available_balance: 0,
+      total_ledger_balance_cents: 0,
+      total_held_amount_cents: 0,
+      total_available_balance_cents: 0,
     })
 
     return {
@@ -1340,46 +1454,6 @@ export class Soledgic {
 
   async getTransactions(startDate?: string, endDate?: string, creatorId?: string) {
     return this.request('generate-report', { report_type: 'transaction_history', start_date: startDate, end_date: endDate, creator_id: creatorId })
-  }
-
-  // === CREDITS ===
-
-  /** Issue credits to a user. 1000 credits = $1 USD (Soledgic standard rate). */
-  async issueCredits(userId: string, credits: number, options: { reason?: string; referenceId?: string } = {}) {
-    return this.request('credits', {
-      action: 'issue',
-      user_id: userId,
-      credits,
-      reason: options.reason,
-      reference_id: options.referenceId,
-    })
-  }
-
-  /** Convert earned credits to spendable balance. Minimum 5000 credits ($5). */
-  async convertCredits(userId: string, credits: number) {
-    return this.request('credits', {
-      action: 'convert',
-      user_id: userId,
-      credits,
-    })
-  }
-
-  /** Spend spendable balance on creator content. Amount in cents. Split applies. */
-  async redeemCredits(userId: string, creatorId: string, amountCents: number, referenceId: string, options: { description?: string; splitPercent?: number } = {}) {
-    return this.request('credits', {
-      action: 'redeem',
-      user_id: userId,
-      creator_id: creatorId,
-      amount: amountCents,
-      reference_id: referenceId,
-      description: options.description,
-      split_percent: options.splitPercent,
-    })
-  }
-
-  /** Get user's credit balance (unconverted) and spendable balance (converted). */
-  async getCreditBalance(userId: string) {
-    return this.request('credits', { action: 'balance', user_id: userId })
   }
 
   // === PDF EXPORTS ===
@@ -1796,7 +1870,14 @@ export class Soledgic {
 
   // === BANK IMPORT ===
 
-  async getImportTemplates() {
+  async getImportTemplates(): Promise<{
+    success: boolean
+    data: {
+      builtin: Array<Record<string, unknown>>
+      custom: Array<Record<string, unknown>>
+      accounts: Array<Record<string, unknown>>
+    }
+  }> {
     return this.request('import-transactions', { action: 'get_templates' })
   }
 
@@ -1813,7 +1894,24 @@ export class Soledgic {
     description: string
     amount: number
     reference?: string
-  }>) {
+  }>): Promise<{
+    success: boolean
+    data: {
+      session_id?: string
+      imported: number
+      skipped: number
+      matched?: number
+      unmatched?: number
+      errors?: string[]
+      balance?: {
+        opening: number
+        closing_expected: number
+        closing_computed: number
+        discrepancy: number
+        verified: boolean
+      } | null
+    }
+  }> {
     return this.request('import-transactions', {
       action: 'import',
       transactions,
@@ -1853,14 +1951,18 @@ export class Soledgic {
     })
   }
 
-  async releaseFunds(entryId: string, executeTransfer = true) {
+  async releaseFunds(entryId: string, _executeTransfer = false) {
     const response = await this.request<any>(`holds/${entryId}/release`, {
-      execute_transfer: executeTransfer,
+      // Sending false also prevents payout execution if this SDK briefly
+      // talks to an older API deployment during a rollout.
+      execute_transfer: false,
     })
     return {
       success: response.success,
       release_id: response.release?.id ?? null,
       entry_id: response.release?.hold_id ?? entryId,
+      status: response.release?.status ?? null,
+      availability_released: Boolean(response.release?.availability_released),
       executed: Boolean(response.release?.executed),
       transfer_id: response.release?.transfer_id ?? null,
       transfer_status: response.release?.transfer_status ?? null,
@@ -1877,7 +1979,7 @@ export class Soledgic {
       success: response.success,
       participant_id: response.eligibility?.participant_id ?? participantId,
       eligible: Boolean(response.eligibility?.eligible),
-      available_balance: response.eligibility?.available_balance ?? 0,
+      available_balance_cents: response.eligibility?.available_balance_cents ?? 0,
       issues: response.eligibility?.issues || [],
       requirements: response.eligibility?.requirements || {},
     }
@@ -1999,9 +2101,9 @@ export class Soledgic {
         linkedUserId: participant.linked_user_id ?? null,
         name: participant.name ?? null,
         tier: participant.tier ?? null,
-        ledgerBalance: participant.ledger_balance,
-        heldAmount: participant.held_amount,
-        availableBalance: participant.available_balance,
+        ledgerBalanceCents: participant.ledger_balance_cents,
+        heldAmountCents: participant.held_amount_cents,
+        availableBalanceCents: participant.available_balance_cents,
       })),
     }
   }
@@ -2017,11 +2119,11 @@ export class Soledgic {
         name: participant.name ?? null,
         tier: participant.tier ?? null,
         customSplitPercent: participant.custom_split_percent ?? null,
-        ledgerBalance: participant.ledger_balance,
-        heldAmount: participant.held_amount,
-        availableBalance: participant.available_balance,
+        ledgerBalanceCents: participant.ledger_balance_cents,
+        heldAmountCents: participant.held_amount_cents,
+        availableBalanceCents: participant.available_balance_cents,
         holds: (participant.holds || []).map((hold: any) => ({
-          amount: hold.amount,
+          amountCents: hold.amount_cents,
           reason: hold.reason ?? null,
           releaseDate: hold.release_date ?? null,
           status: hold.status,
@@ -2037,7 +2139,7 @@ export class Soledgic {
       eligibility: {
         participantId: response.eligibility?.participant_id ?? participantId,
         eligible: Boolean(response.eligibility?.eligible),
-        availableBalance: response.eligibility?.available_balance ?? 0,
+        availableBalanceCents: response.eligibility?.available_balance_cents ?? 0,
         issues: response.eligibility?.issues || [],
         requirements: response.eligibility?.requirements || {},
       },
@@ -2202,8 +2304,6 @@ export class Soledgic {
         sharedTaxProfile: response.calculation.shared_tax_profile
           ? {
               status: response.calculation.shared_tax_profile.status,
-              legalName: response.calculation.shared_tax_profile.legal_name ?? null,
-              taxIdLast4: response.calculation.shared_tax_profile.tax_id_last4 ?? null,
             }
           : null,
       },
@@ -2249,7 +2349,16 @@ export class Soledgic {
     }
   }
 
-  async exportTaxDocuments(taxYear?: number, format: 'csv' | 'json' = 'json') {
+  async exportTaxDocuments(taxYear?: number, format?: 'json'): Promise<{
+    success: boolean
+    tax_year?: number
+    documents?: Array<Record<string, unknown>>
+  }>
+  async exportTaxDocuments(taxYear: number | undefined, format: 'csv'): Promise<{ csv: string; filename: string }>
+  async exportTaxDocuments(taxYear?: number, format: 'csv' | 'json' = 'json'): Promise<
+    | { success: boolean; tax_year?: number; documents?: Array<Record<string, unknown>> }
+    | { csv: string; filename: string }
+  > {
     if (format === 'csv') {
       const response = await this.requestGetRaw('tax/documents/export', { tax_year: taxYear, format })
       const csv = await response.text()
@@ -2291,8 +2400,6 @@ export class Soledgic {
         sharedTaxProfile: summary.shared_tax_profile
           ? {
               status: summary.shared_tax_profile.status,
-              legalName: summary.shared_tax_profile.legal_name ?? null,
-              taxIdLast4: summary.shared_tax_profile.tax_id_last4 ?? null,
             }
           : null,
       })),
@@ -2643,6 +2750,120 @@ export class Soledgic {
     }
   }
 
+  async spendSharedWallet(req: SharedWalletSpendRequest): Promise<SharedWalletSpendResponse> {
+    const response = await this.request<any>('wallets/shared-spend', {
+      consumer_sub: req.consumerSub,
+      amount: req.amount,
+      reference_id: req.referenceId,
+      creator_id: req.creatorId,
+      creator_percent: req.creatorPercent,
+      sales_tax: req.salesTax,
+      product_id: req.productId,
+      product_name: req.productName,
+      metadata: req.metadata,
+    })
+    const spend = response.spend || response
+    return {
+      success: response.success ?? false,
+      consumerTransactionId: spend.consumer_transaction_id ?? null,
+      platformTransactionId: spend.platform_transaction_id ?? null,
+      referenceId: spend.reference_id ?? null,
+      amountCents: spend.amount_cents ?? null,
+      creatorId: spend.creator_id ?? null,
+      walletBalanceCents: spend.wallet_balance_cents ?? null,
+      creatorBalanceCents: spend.creator_balance_cents ?? null,
+    }
+  }
+
+  async reverseSharedWalletSpend(req: SharedWalletSpendReverseRequest): Promise<SharedWalletSpendReverseResponse> {
+    const response = await this.request<any>('wallets/shared-spend/reverse', {
+      sale_transaction_id: req.saleTransactionId,
+      reason: req.reason,
+      metadata: req.metadata,
+    })
+    const reversal = response.reversal || response
+    return {
+      success: response.success ?? false,
+      consumerReversalTransactionId: reversal.consumer_reversal_transaction_id ?? null,
+      platformReversalTransactionId: reversal.platform_reversal_transaction_id ?? null,
+      saleTransactionId: reversal.sale_transaction_id ?? null,
+      status: reversal.status ?? null,
+      walletBalanceCents: reversal.wallet_balance_cents ?? null,
+      creatorBalanceCents: reversal.creator_balance_cents ?? null,
+    }
+  }
+
+  async revokeSharedSpendAuthorization(
+    req: SharedWalletAuthorizationRevokeRequest,
+  ): Promise<SharedWalletAuthorizationRevokeResponse> {
+    const response = await this.request<any>('wallets/shared-spend/authorization/revoke', {
+      consumer_sub: req.consumerSub,
+    })
+    return {
+      success: response.success ?? false,
+      revoked: response.revoked ?? false,
+      consumerSub: response.consumer_sub ?? req.consumerSub ?? null,
+    }
+  }
+
+  async holdSharedWallet(req: SharedWalletHoldRequest): Promise<SharedWalletHoldResponse> {
+    const response = await this.request<any>('wallets/shared-hold', {
+      consumer_sub: req.consumerSub,
+      amount: req.amount,
+      reference_id: req.referenceId,
+      creator_id: req.creatorId,
+      creator_percent: req.creatorPercent,
+      sales_tax: req.salesTax,
+      product_id: req.productId,
+      product_name: req.productName,
+      metadata: req.metadata,
+    })
+    const hold = response.hold || response
+    return {
+      success: response.success ?? false,
+      holdId: hold.hold_id ?? null,
+      consumerTransactionId: hold.consumer_transaction_id ?? null,
+      platformTransactionId: hold.platform_transaction_id ?? null,
+      referenceId: hold.reference_id ?? null,
+      amountCents: hold.amount_cents ?? null,
+      creatorId: hold.creator_id ?? null,
+      status: hold.status ?? null,
+      walletBalanceCents: hold.wallet_balance_cents ?? null,
+    }
+  }
+
+  async releaseSharedWalletHold(req: SharedWalletHoldActionRequest): Promise<SharedWalletReleaseResponse> {
+    const response = await this.request<any>('wallets/shared-hold/release', {
+      reference_id: req.referenceId,
+      metadata: req.metadata,
+    })
+    const release = response.release || response
+    return {
+      success: response.success ?? false,
+      releaseTransactionId: release.release_transaction_id ?? null,
+      referenceId: release.reference_id ?? null,
+      status: release.status ?? null,
+      creatorBalanceCents: release.creator_balance_cents ?? null,
+    }
+  }
+
+  async refundSharedWalletHold(req: SharedWalletHoldActionRequest): Promise<SharedWalletRefundResponse> {
+    const response = await this.request<any>('wallets/shared-hold/refund', {
+      reference_id: req.referenceId,
+      reason: req.reason,
+      metadata: req.metadata,
+    })
+    const refund = response.refund || response
+    return {
+      success: response.success ?? false,
+      consumerTransactionId: refund.consumer_transaction_id ?? null,
+      platformTransactionId: refund.platform_transaction_id ?? null,
+      referenceId: refund.reference_id ?? null,
+      status: refund.status ?? null,
+      walletBalanceCents: refund.wallet_balance_cents ?? null,
+    }
+  }
+
   async withdrawFromWallet(req: WalletWithdrawRequest): Promise<WalletWithdrawalResponse> {
     const response = await this.request<any>(`wallets/${req.walletId}/withdrawals`, {
       amount: req.amount,
@@ -2724,7 +2945,9 @@ export class Soledgic {
 
   async releaseHold(req: ReleaseHoldRequest): Promise<ReleaseHoldResponse> {
     const response = await this.request<any>(`holds/${req.holdId}/release`, {
-      execute_transfer: req.executeTransfer !== false,
+      // executeTransfer is a deprecated compatibility input. Hold release is
+      // ledger-only, and /v1/payouts is the sole ACH execution path.
+      execute_transfer: false,
     })
     const release = response.release || response
     return {
@@ -2732,6 +2955,8 @@ export class Soledgic {
       release: {
         id: release.id,
         holdId: release.hold_id ?? req.holdId,
+        status: release.status ?? null,
+        availabilityReleased: Boolean(release.availability_released),
         executed: Boolean(release.executed),
         transferId: release.transfer_id ?? null,
         transferStatus: release.transfer_status ?? null,
@@ -2744,9 +2969,17 @@ export class Soledgic {
   async createCheckoutSession(
     req: CreateCheckoutSessionRequest,
   ): Promise<CheckoutSessionResourceResponse> {
-    const hasPaymentMethod = 'paymentMethodId' in req ? Boolean(req.paymentMethodId || req.sourceId) : false
+    const paymentMethodId = 'paymentMethodId' in req ? req.paymentMethodId : undefined
+    const buyerUserId = typeof req.buyerUserId === 'string' ? req.buyerUserId.trim() : ''
+    if (req.purchaseMode === 'direct_funded_wallet' && !buyerUserId) {
+      throw new Error('buyerUserId is required for direct_funded_wallet checkout')
+    }
+    if (req.purchaseMode === 'direct_funded_wallet' && !req.successUrl?.trim()) {
+      throw new Error('successUrl is required for direct_funded_wallet checkout')
+    }
+    const hasPaymentMethod = Boolean(paymentMethodId)
     if (!hasPaymentMethod && !req.successUrl) {
-      throw new Error('Either paymentMethodId/sourceId or successUrl is required')
+      throw new Error('Either paymentMethodId or successUrl is required')
     }
     const currency = req.currency?.toUpperCase()
     if (currency && currency !== 'USD') {
@@ -2761,11 +2994,11 @@ export class Soledgic {
       product_name: req.productName,
       customer_email: req.customerEmail,
       customer_id: req.customerId,
-      buyer_user_id: req.buyerUserId,
+      buyer_user_id: buyerUserId || undefined,
       purchase_mode: req.purchaseMode,
+      hold_funds: req.holdFunds === true ? true : undefined,
       sandbox_checkout_provider: req.sandboxCheckoutProvider,
-      payment_method_id: 'paymentMethodId' in req ? req.paymentMethodId : undefined,
-      source_id: 'sourceId' in req ? req.sourceId : undefined,
+      payment_method_id: paymentMethodId,
       success_url: req.successUrl,
       cancel_url: req.cancelUrl,
       idempotency_key: 'idempotencyKey' in req ? req.idempotencyKey : undefined,
@@ -2792,15 +3025,156 @@ export class Soledgic {
         fundingTransactionId: checkoutSession.funding_transaction_id ?? null,
         saleTransactionId: checkoutSession.sale_transaction_id ?? null,
         saleReference: checkoutSession.sale_reference ?? null,
+        holdId: checkoutSession.hold_id ?? checkoutSession.payment_hold_id ?? checkoutSession.holdId ?? checkoutSession.paymentHoldId ?? null,
+        paymentHoldId: checkoutSession.payment_hold_id ?? checkoutSession.hold_id ?? checkoutSession.paymentHoldId ?? checkoutSession.holdId ?? null,
         breakdown: checkoutSession.breakdown
           ? {
-              grossAmount: checkoutSession.breakdown.gross_amount,
-              creatorAmount: checkoutSession.breakdown.creator_amount,
-              platformAmount: checkoutSession.breakdown.platform_amount,
+              grossAmountCents: checkoutSession.breakdown.gross_amount_cents,
+              subtotalAmountCents: checkoutSession.breakdown.subtotal_amount_cents ?? null,
+              salesTaxAmountCents: checkoutSession.breakdown.sales_tax_amount_cents ?? null,
+              salesTaxState: checkoutSession.breakdown.sales_tax_state ?? null,
+              creatorAmountCents: checkoutSession.breakdown.creator_amount_cents,
+              platformAmountCents: checkoutSession.breakdown.platform_amount_cents,
+              soledgicFeeCents: checkoutSession.breakdown.soledgic_fee_cents ?? null,
               creatorPercent: checkoutSession.breakdown.creator_percent,
             }
           : null,
       },
+    }
+  }
+
+  async createMembershipTier(req: CreateMembershipTierRequest): Promise<{ success: boolean; tier: MembershipTier }> {
+    const response = await this.request<any>('memberships/tiers', {
+      tier_key: req.tierKey,
+      name: req.name,
+      participant_id: req.participantId,
+      amount_cents: req.amountCents,
+      currency: req.currency,
+      billing_interval: req.billingInterval,
+      description: req.description,
+      product_id: req.productId,
+      trial_days: req.trialDays,
+      active: req.active,
+      benefits: req.benefits,
+      metadata: req.metadata,
+    })
+    return { success: Boolean(response.success), tier: this.mapMembershipTier(response.tier || response) }
+  }
+
+  async listMembershipTiers(): Promise<{ success: boolean; tiers: MembershipTier[] }> {
+    const response = await this.requestGet<any>('memberships/tiers')
+    return {
+      success: Boolean(response.success),
+      tiers: (response.tiers || []).map((tier: any) => this.mapMembershipTier(tier)),
+    }
+  }
+
+  async createMembership(req: CreateMembershipRequest): Promise<MembershipResponse> {
+    const response = await this.request<any>('memberships', {
+      tier_id: req.tierId,
+      tier_key: req.tierKey,
+      customer_id: req.customerId,
+      customer_email: req.customerEmail,
+      buyer_user_id: req.buyerUserId,
+      payment_method_id: 'paymentMethodId' in req ? req.paymentMethodId : undefined,
+      success_url: 'successUrl' in req ? req.successUrl : undefined,
+      cancel_url: req.cancelUrl,
+      idempotency_key: 'idempotencyKey' in req ? req.idempotencyKey : undefined,
+      sandbox_checkout_provider: req.sandboxCheckoutProvider,
+      metadata: req.metadata,
+    })
+    return this.mapMembershipResponse(response)
+  }
+
+  async listMemberships(customerId?: string): Promise<{ success: boolean; memberships: any[] }> {
+    const response = await this.requestGet<any>('memberships', { customer_id: customerId })
+    return { success: Boolean(response.success), memberships: response.memberships || [] }
+  }
+
+  async getMembership(membershipId: string): Promise<{ success: boolean; membership: any }> {
+    const response = await this.requestGet<any>(`memberships/${membershipId}`)
+    return { success: Boolean(response.success), membership: response.membership || response }
+  }
+
+  async renewMembership(
+    membershipId: string,
+    req: Omit<CreateMembershipRequest, 'tierId' | 'tierKey' | 'customerId'>,
+  ): Promise<MembershipResponse> {
+    const response = await this.request<any>(`memberships/${membershipId}/renew`, {
+      customer_email: req.customerEmail,
+      buyer_user_id: req.buyerUserId,
+      payment_method_id: 'paymentMethodId' in req ? req.paymentMethodId : undefined,
+      success_url: 'successUrl' in req ? req.successUrl : undefined,
+      cancel_url: req.cancelUrl,
+      idempotency_key: 'idempotencyKey' in req ? req.idempotencyKey : undefined,
+      sandbox_checkout_provider: req.sandboxCheckoutProvider,
+      metadata: req.metadata,
+    })
+    return this.mapMembershipResponse(response)
+  }
+
+  async cancelMembership(
+    membershipId: string,
+    options?: { cancelAtPeriodEnd?: boolean; reason?: string },
+  ): Promise<{ success: boolean; membership: any }> {
+    const response = await this.request<any>(`memberships/${membershipId}/cancel`, {
+      cancel_at_period_end: options?.cancelAtPeriodEnd,
+      reason: options?.reason,
+    })
+    return { success: Boolean(response.success), membership: response.membership || response }
+  }
+
+  async resumeMembership(membershipId: string): Promise<{ success: boolean; membership: any }> {
+    const response = await this.request<any>(`memberships/${membershipId}/resume`, {})
+    return { success: Boolean(response.success), membership: response.membership || response }
+  }
+
+  async getMembershipEntitlements(customerId: string, tierKey?: string): Promise<MembershipEntitlementsResponse> {
+    const response = await this.requestGet<any>('memberships/entitlements', {
+      customer_id: customerId,
+      tier_key: tierKey,
+    })
+    return {
+      success: Boolean(response.success),
+      entitlements: (response.entitlements || []).map((entitlement: any) => ({
+        membershipId: entitlement.membership_id,
+        tierId: entitlement.tier_id,
+        tierKey: entitlement.tier_key,
+        customerId: entitlement.customer_id,
+        active: Boolean(entitlement.active),
+        currentPeriodEnd: entitlement.current_period_end ?? null,
+        benefits: Array.isArray(entitlement.benefits) ? entitlement.benefits : [],
+      })),
+    }
+  }
+
+  private mapMembershipTier(tier: any): MembershipTier {
+    return {
+      id: tier.id,
+      tierKey: tier.tier_key,
+      name: tier.name,
+      description: tier.description ?? null,
+      participantId: tier.participant_id,
+      productId: tier.product_id ?? null,
+      amountCents: tier.amount_cents,
+      currency: tier.currency,
+      billingInterval: tier.billing_interval,
+      trialDays: tier.trial_days ?? 0,
+      active: tier.active !== false,
+      benefits: Array.isArray(tier.benefits) ? tier.benefits : [],
+      metadata: tier.metadata || {},
+      createdAt: tier.created_at ?? null,
+      updatedAt: tier.updated_at ?? null,
+    }
+  }
+
+  private mapMembershipResponse(response: any): MembershipResponse {
+    const checkoutSession = response.checkout_session || null
+    return {
+      success: Boolean(response.success),
+      membership: response.membership || {},
+      billingCycle: response.billing_cycle || null,
+      checkoutSession,
     }
   }
 
@@ -3014,22 +3388,19 @@ export class Soledgic {
       payout: {
         id: payout.id,
         transactionId: payout.transaction_id,
-        grossAmount: payout.gross_amount ?? null,
         grossAmountCents: payout.gross_amount_cents ?? null,
-        fees: payout.fees ?? null,
         feesCents: payout.fees_cents ?? null,
-        netAmount: payout.net_amount ?? null,
         netAmountCents: payout.net_amount_cents ?? null,
-        previousBalance: payout.previous_balance ?? null,
         previousBalanceCents: payout.previous_balance_cents ?? null,
-        newBalance: payout.new_balance ?? null,
         newBalanceCents: payout.new_balance_cents ?? null,
         status: payout.status ?? null,
         simulated: payout.simulated === true,
         livemode: payout.livemode === true,
         payoutRail: payout.payout_rail ?? null,
-        processorTransferId: payout.processor_transfer_id ?? null,
-        processorTransferStatus: payout.processor_transfer_status ?? null,
+        bankTransferId: payout.bank_transfer_id ?? payout.processor_transfer_id ?? null,
+        bankTransferStatus: payout.bank_transfer_status ?? payout.processor_transfer_status ?? null,
+        processorTransferId: payout.processor_transfer_id ?? payout.bank_transfer_id ?? null,
+        processorTransferStatus: payout.processor_transfer_status ?? payout.bank_transfer_status ?? null,
         webhookDeliveriesQueued: payout.webhook_deliveries_queued ?? null,
         webhookDeliveriesDelivered: payout.webhook_deliveries_delivered ?? null,
         webhookDeliveryOutcomes: Array.isArray(payout.webhook_delivery_outcomes)
@@ -3077,13 +3448,13 @@ export class Soledgic {
             transactionId: refund.transaction_id ?? null,
             referenceId: refund.reference_id ?? null,
             saleReference: refund.sale_reference ?? null,
-            refundedAmount: refund.refunded_amount ?? null,
+            refundedAmountCents: refund.refunded_amount_cents ?? null,
             currency: refund.currency ?? null,
             status: refund.status ?? null,
             breakdown: refund.breakdown
               ? {
-                  fromCreator: refund.breakdown.from_creator,
-                  fromPlatform: refund.breakdown.from_platform,
+                  fromCreatorCents: refund.breakdown.from_creator_cents,
+                  fromPlatformCents: refund.breakdown.from_platform_cents,
                 }
               : null,
             isFullRefund: refund.is_full_refund ?? null,
@@ -3115,13 +3486,13 @@ export class Soledgic {
         transactionId: refund.transaction_id ?? null,
         referenceId: refund.reference_id ?? null,
         saleReference: refund.sale_reference ?? null,
-        refundedAmount: refund.refunded_amount ?? null,
+        refundedAmountCents: refund.refunded_amount_cents ?? null,
         currency: refund.currency ?? null,
         status: refund.status ?? null,
         breakdown: refund.breakdown
           ? {
-              fromCreator: refund.breakdown.from_creator,
-              fromPlatform: refund.breakdown.from_platform,
+              fromCreatorCents: refund.breakdown.from_creator_cents,
+              fromPlatformCents: refund.breakdown.from_platform_cents,
             }
           : null,
         isFullRefund: refund.is_full_refund ?? null,
@@ -3144,7 +3515,7 @@ export class Soledgic {
         transactionId: refund.transaction_id ?? null,
         referenceId: refund.reference_id ?? null,
         saleReference: refund.sale_reference ?? null,
-        refundedAmount: refund.refunded_amount,
+        refundedAmountCents: refund.refunded_amount_cents,
         currency: refund.currency,
         status: refund.status,
         reason: refund.reason ?? null,
@@ -3153,8 +3524,8 @@ export class Soledgic {
         createdAt: refund.created_at ?? null,
         breakdown: refund.breakdown
           ? {
-              fromCreator: refund.breakdown.from_creator,
-              fromPlatform: refund.breakdown.from_platform,
+              fromCreatorCents: refund.breakdown.from_creator_cents,
+              fromPlatformCents: refund.breakdown.from_platform_cents,
             }
           : null,
         repairPending: refund.repair_pending ?? null,

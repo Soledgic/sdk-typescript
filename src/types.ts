@@ -83,6 +83,10 @@ export type SandboxWebhookEventType =
   | 'sandbox.test'
   | 'checkout.completed'
   | 'checkout.failed'
+  | 'membership.activated'
+  | 'membership.cancelled'
+  | 'membership.past_due'
+  | 'membership.expired'
   | 'dispute.created'
   | 'dispute.funds_withdrawn'
   | 'chargeback.created'
@@ -94,9 +98,16 @@ export type SandboxWebhookEventType =
   | 'refund_request.completed'
   | 'refund_request.rejected'
   | 'refund_request.cancelled'
+  | 'payout_request.created'
+  | 'payout_request.approved'
+  | 'payout_request.rejected'
+  | 'payout_request.cancelled'
+  | 'payout_request.failed'
+  | 'payout_request.completed'
   | 'refund.created'
   | 'sale.refunded'
   | 'payout.created'
+  | 'payout.processing'
   | 'payout.executed'
   | 'payout.failed'
 
@@ -374,12 +385,12 @@ export interface RecordRefundResponse {
   transactionId: string | null
   referenceId: string | null
   saleReference: string | null
-  refundedAmount: number | null
+  refundedAmountCents: number | null
   currency: string | null
   status: string | null
   breakdown: {
-    fromCreator: number
-    fromPlatform: number
+    fromCreatorCents: number
+    fromPlatformCents: number
   } | null
   isFullRefund: boolean | null
   repairPending?: boolean | null
@@ -397,7 +408,7 @@ export interface RefundSummary {
   transactionId: string | null
   referenceId: string | null
   saleReference: string | null
-  refundedAmount: number
+  refundedAmountCents: number
   currency: string
   status: string
   reason: string | null
@@ -405,8 +416,8 @@ export interface RefundSummary {
   externalRefundId: string | null
   createdAt: string | null
   breakdown: {
-    fromCreator: number
-    fromPlatform: number
+    fromCreatorCents: number
+    fromPlatformCents: number
   } | null
   repairPending?: boolean | null
   lastError?: string | null
@@ -470,7 +481,7 @@ export interface ParticipantTaxInfo {
 export interface ParticipantPayoutPreferences {
   schedule?: 'manual' | 'weekly' | 'biweekly' | 'monthly'
   minimumAmount?: number
-  method?: 'card' | 'manual'
+  method?: 'ach' | 'card' | 'manual'
 }
 
 export interface CreateParticipantRequest {
@@ -544,7 +555,11 @@ export interface RecordTransferRequest {
   amount: number
   transferType: 'tax_reserve' | 'payout_reserve' | 'owner_draw' | 'owner_contribution' | 'operating' | 'savings' | 'investment' | 'other'
   description?: string
-  referenceId?: string
+  // Required: used as the idempotency key. record-transfer dedups on
+  // (ledger_id, reference_id) and rejects requests that omit it. Supply a stable
+  // key per logical transfer so retries don't double-post — do NOT generate a
+  // fresh value on each attempt.
+  referenceId: string
 }
 
 export interface RiskEvaluationRequest {
@@ -644,7 +659,26 @@ export interface HoldQueryOptions {
 
 export interface ReleaseHoldRequest {
   holdId: string
+  /**
+   * @deprecated Hold release never executes a payout. This option is accepted
+   * for source compatibility and ignored; use `payouts.create` for ACH.
+   */
   executeTransfer?: boolean
+}
+
+type StandardCheckoutPayment = (
+  { paymentMethodId: string; idempotencyKey: string; successUrl?: string; cancelUrl?: string } |
+  { paymentMethodId?: undefined; successUrl: string; cancelUrl?: string; idempotencyKey?: string }
+)
+
+type WalletFundedHostedCheckoutMode = {
+  /** The authenticated consumer whose wallet is funded and debited atomically. */
+  buyerUserId: string
+  purchaseMode: 'direct_funded_wallet'
+  paymentMethodId?: undefined
+  successUrl: string
+  cancelUrl?: string
+  idempotencyKey?: string
 }
 
 export type CreateCheckoutSessionRequest = {
@@ -656,15 +690,99 @@ export type CreateCheckoutSessionRequest = {
   /** Customer email for hosted display/receipts. Sandbox buyer sessions can use this alone to derive a stable test wallet. */
   customerEmail?: string
   customerId?: string
-  buyerUserId?: string
-  purchaseMode?: 'direct_funded_wallet'
+  /** Request a releasable marketplace hold; completed checkout webhooks include hold_id/payment_hold_id. */
+  holdFunds?: boolean
   sandboxCheckoutProvider?: 'soledgic' | 'stripe'
   metadata?: Record<string, string>
 } & (
-  { paymentMethodId: string; sourceId?: string; idempotencyKey: string; successUrl?: string; cancelUrl?: string } |
-  { paymentMethodId?: string; sourceId: string; idempotencyKey: string; successUrl?: string; cancelUrl?: string } |
-  { paymentMethodId?: undefined; sourceId?: undefined; successUrl: string; cancelUrl?: string; idempotencyKey?: string }
+  WalletFundedHostedCheckoutMode |
+  ({ purchaseMode?: undefined; buyerUserId?: string } & StandardCheckoutPayment)
 )
+
+export type MembershipBillingInterval = 'weekly' | 'monthly' | 'quarterly' | 'annual'
+
+export interface MembershipTier {
+  id: string
+  tierKey: string
+  name: string
+  description: string | null
+  participantId: string
+  productId: string | null
+  amountCents: number
+  currency: string
+  billingInterval: MembershipBillingInterval
+  trialDays: number
+  active: boolean
+  benefits: unknown[]
+  metadata: Record<string, unknown>
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+export interface CreateMembershipTierRequest {
+  tierKey: string
+  name: string
+  participantId: string
+  amountCents: number
+  currency?: 'USD'
+  billingInterval?: MembershipBillingInterval
+  description?: string
+  productId?: string
+  trialDays?: number
+  active?: boolean
+  benefits?: unknown[]
+  metadata?: Record<string, unknown>
+}
+
+export interface Membership {
+  id: string
+  tierId: string | null
+  customerId: string
+  customerEmail: string | null
+  buyerUserId: string | null
+  status: string
+  currentPeriodStart: string | null
+  currentPeriodEnd: string | null
+  cancelAtPeriodEnd: boolean
+  latestCheckoutSessionId: string | null
+  latestTransactionId: string | null
+  metadata: Record<string, unknown>
+  createdAt: string | null
+  updatedAt: string | null
+}
+
+export type CreateMembershipRequest = {
+  tierId?: string
+  tierKey?: string
+  customerId: string
+  customerEmail?: string
+  buyerUserId?: string
+  metadata?: Record<string, string>
+  sandboxCheckoutProvider?: 'soledgic' | 'stripe'
+} & (
+  { paymentMethodId: string; idempotencyKey: string; successUrl?: string; cancelUrl?: string } |
+  { paymentMethodId?: undefined; successUrl: string; cancelUrl?: string; idempotencyKey?: string }
+)
+
+export interface MembershipResponse {
+  success: boolean
+  membership: Membership | Record<string, unknown>
+  billingCycle?: Record<string, unknown> | null
+  checkoutSession?: CheckoutSessionResourceResponse['checkoutSession'] | Record<string, unknown> | null
+}
+
+export interface MembershipEntitlementsResponse {
+  success: boolean
+  entitlements: Array<{
+    membershipId: string
+    tierId: string
+    tierKey: string
+    customerId: string
+    active: boolean
+    currentPeriodEnd: string | null
+    benefits: unknown[]
+  }>
+}
 
 export type WalletSessionPermission =
   | 'view_balance'
@@ -937,7 +1055,7 @@ export interface CreateCreatorWalletRequest {
   metadata?: Record<string, unknown>
 }
 
-export type UniversalCheckoutRequest = {
+type UniversalCheckoutBaseRequest = {
   /** Your app's stable creator/seller id, mapped to participant_id. */
   creatorId: string
   amount: number
@@ -950,12 +1068,32 @@ export type UniversalCheckoutRequest = {
   customerEmail?: string
   /** Your app's stable order/purchase id. Used as idempotency_key when no explicit idempotencyKey is provided. */
   externalOrderId?: string
+  /** Request a releasable marketplace hold; completed checkout webhooks include hold_id/payment_hold_id. */
+  holdFunds?: boolean
+  sandboxCheckoutProvider?: 'soledgic' | 'stripe'
   metadata?: Record<string, string>
-} & (
-  { paymentMethodId: string; sourceId?: string; idempotencyKey: string; successUrl?: string; cancelUrl?: string } |
-  { paymentMethodId?: string; sourceId: string; idempotencyKey: string; successUrl?: string; cancelUrl?: string } |
-  { paymentMethodId?: undefined; sourceId?: undefined; successUrl: string; cancelUrl?: string; idempotencyKey?: string }
+}
+
+export type UniversalCheckoutRequest = UniversalCheckoutBaseRequest & (
+  WalletFundedHostedCheckoutMode |
+  ({ purchaseMode?: undefined; buyerUserId?: string } & StandardCheckoutPayment)
 )
+
+/**
+ * A buyer-funded hosted checkout. Soledgic collects funds through the configured
+ * hosted processor, credits the buyer wallet, and applies the purchase atomically.
+ * This request never enters creator/merchant onboarding.
+ */
+export type CreateWalletFundedCheckoutRequest = UniversalCheckoutBaseRequest & {
+  /** Non-empty authenticated consumer id used for wallet accounting. */
+  buyerUserId: string
+  /** Required redirect after the hosted processor confirms payment. */
+  successUrl: string
+  cancelUrl?: string
+  /** Explicit idempotency key. Falls back to externalOrderId when omitted. */
+  idempotencyKey?: string
+  currency?: 'USD'
+}
 
 // === INVOICE TYPES ===
 
@@ -1202,9 +1340,13 @@ export interface ImportBankStatementRequest {
 // === RESPONSE TYPES ===
 
 export interface CheckoutBreakdown {
-  grossAmount: number
-  creatorAmount: number
-  platformAmount: number
+  grossAmountCents: number
+  subtotalAmountCents: number | null
+  salesTaxAmountCents: number | null
+  salesTaxState: string | null
+  creatorAmountCents: number
+  platformAmountCents: number
+  soledgicFeeCents: number | null
   creatorPercent: number
 }
 
@@ -1264,9 +1406,9 @@ export interface ParticipantSummary {
   linkedUserId: string | null
   name: string | null
   tier: string | null
-  ledgerBalance: number
-  heldAmount: number
-  availableBalance: number
+  ledgerBalanceCents: number
+  heldAmountCents: number
+  availableBalanceCents: number
 }
 
 export interface ParticipantDetail {
@@ -1275,11 +1417,11 @@ export interface ParticipantDetail {
   name: string | null
   tier: string | null
   customSplitPercent: number | null
-  ledgerBalance: number
-  heldAmount: number
-  availableBalance: number
+  ledgerBalanceCents: number
+  heldAmountCents: number
+  availableBalanceCents: number
   holds: Array<{
-    amount: number
+    amountCents: number
     reason: string | null
     releaseDate: string | null
     status: string
@@ -1308,7 +1450,7 @@ export interface ParticipantPayoutEligibilityResponse {
   eligibility: {
     participantId: string
     eligible: boolean
-    availableBalance: number
+    availableBalanceCents: number
     issues: string[]
     requirements: Record<string, unknown>
   }
@@ -1473,9 +1615,9 @@ export interface TaxCalculationResponse {
     threshold: number
     linkedUserId: string | null
     sharedTaxProfile: {
+      // legalName/taxIdLast4 were removed from the tax endpoints' response for PII
+      // minimization; only the certification status is exposed here now.
       status: string
-      legalName: string | null
-      taxIdLast4: string | null
     } | null
   }
 }
@@ -1493,9 +1635,9 @@ export interface TaxSummaryResponse {
     totalPaidOut: number
     requires1099: boolean
     sharedTaxProfile: {
+      // legalName/taxIdLast4 were removed from the tax endpoints' response for PII
+      // minimization; only the certification status is exposed here now.
       status: string
-      legalName: string | null
-      taxIdLast4: string | null
     } | null
   }>
   totals: {
@@ -1671,6 +1813,132 @@ export interface WalletTopupResponse {
   balance: number | null
 }
 
+export interface SharedWalletSpendRequest {
+  /** The buyer's Soledgic OIDC subject (the `sub` from the ID token). */
+  consumerSub: string
+  /** Gross amount in cents. */
+  amount: number
+  /** Idempotency key. */
+  referenceId: string
+  /** Creator receiving the split. */
+  creatorId: string
+  /** Creator share of the subtotal (0-100). Defaults to 80. */
+  creatorPercent?: number
+  /** Sales tax in cents (part of gross). Defaults to 0. */
+  salesTax?: number
+  productId?: string
+  productName?: string
+  metadata?: Record<string, unknown>
+}
+
+export interface SharedWalletSpendResponse {
+  success: boolean
+  consumerTransactionId: string | null
+  platformTransactionId: string | null
+  referenceId: string | null
+  amountCents: number | null
+  creatorId: string | null
+  walletBalanceCents: number | null
+  creatorBalanceCents: number | null
+}
+
+/**
+ * Place an ESCROW hold against a buyer's shared Soledgic balance. Use this for
+ * delivery/escrow purchases — funds leave the buyer's balance and are parked in
+ * the platform's escrow account; the creator is paid only on release. (Use
+ * `sharedSpend` for immediate-settlement purchases.)
+ */
+export interface SharedWalletHoldRequest {
+  /** The buyer's Soledgic OIDC subject (the `sub` from the ID token). */
+  consumerSub: string
+  /** Gross amount in cents. */
+  amount: number
+  /** Idempotency key — typically the order/escrow reference. */
+  referenceId: string
+  /** Creator receiving the split when the hold is released. */
+  creatorId: string
+  /** Creator share of the subtotal (0-100). Defaults to 80. */
+  creatorPercent?: number
+  /** Sales tax in cents (part of gross). Defaults to 0. */
+  salesTax?: number
+  productId?: string
+  productName?: string
+  metadata?: Record<string, unknown>
+}
+
+export interface SharedWalletHoldResponse {
+  success: boolean
+  holdId: string | null
+  consumerTransactionId: string | null
+  platformTransactionId: string | null
+  referenceId: string | null
+  amountCents: number | null
+  creatorId: string | null
+  status: string | null
+  walletBalanceCents: number | null
+}
+
+/** Release or refund a previously placed shared-wallet escrow hold. */
+export interface SharedWalletHoldActionRequest {
+  /** The hold reference (the `referenceId` used when placing the hold). */
+  referenceId: string
+  /** Refund only: an optional reason recorded on the reversal. */
+  reason?: string
+  metadata?: Record<string, unknown>
+}
+
+export interface SharedWalletReleaseResponse {
+  success: boolean
+  releaseTransactionId: string | null
+  referenceId: string | null
+  status: string | null
+  creatorBalanceCents: number | null
+}
+
+export interface SharedWalletRefundResponse {
+  success: boolean
+  consumerTransactionId: string | null
+  platformTransactionId: string | null
+  referenceId: string | null
+  status: string | null
+  walletBalanceCents: number | null
+}
+
+/**
+ * Reverse a completed shared-wallet SPEND (the refund path for immediate-settled
+ * purchases). The buyer is made whole; the creator's share is clawed back and
+ * their balance may go negative (a debt recovered from future earnings).
+ */
+export interface SharedWalletSpendReverseRequest {
+  /** The platform sale transaction id returned when the spend was made. */
+  saleTransactionId: string
+  reason?: string
+  metadata?: Record<string, unknown>
+}
+
+export interface SharedWalletSpendReverseResponse {
+  success: boolean
+  consumerReversalTransactionId: string | null
+  platformReversalTransactionId: string | null
+  saleTransactionId: string | null
+  status: string | null
+  walletBalanceCents: number | null
+  /** Negative => the creator now carries a debt recovered from future earnings. */
+  creatorBalanceCents: number | null
+}
+
+export interface SharedWalletAuthorizationRevokeRequest {
+  /** The buyer's Soledgic OIDC subject (from their ID token). */
+  consumerSub: string
+}
+
+export interface SharedWalletAuthorizationRevokeResponse {
+  success: boolean
+  /** True if an active authorization was revoked; false if there was nothing active. */
+  revoked: boolean
+  consumerSub: string | null
+}
+
 export interface WalletWithdrawRequest {
   walletId: string
   /** Amount in cents */
@@ -1748,8 +2016,13 @@ export interface ReleaseHoldResponse {
   release: {
     id: string
     holdId: string
+    status: string | null
+    availabilityReleased: boolean
+    /** @deprecated Always false for the current hold-release API. */
     executed: boolean
+    /** @deprecated Always null; use the payout response for transfer ids. */
     transferId: string | null
+    /** @deprecated Always null; use the payout response for transfer status. */
     transferStatus: string | null
     amount: number | null
     currency: string | null
@@ -1774,6 +2047,8 @@ export interface CheckoutSessionResourceResponse {
     fundingTransactionId: string | null
     saleTransactionId: string | null
     saleReference: string | null
+    holdId: string | null
+    paymentHoldId: string | null
     breakdown: CheckoutBreakdown | null
   }
 }
@@ -1805,21 +2080,20 @@ export interface PayoutResourceResponse {
   payout: {
     id: string
     transactionId: string
-    grossAmount: number | null
-    grossAmountCents?: number | null
-    fees: number | null
-    feesCents?: number | null
-    netAmount: number | null
-    netAmountCents?: number | null
-    previousBalance: number | null
-    previousBalanceCents?: number | null
-    newBalance: number | null
-    newBalanceCents?: number | null
+    grossAmountCents: number | null
+    feesCents: number | null
+    netAmountCents: number | null
+    previousBalanceCents: number | null
+    newBalanceCents: number | null
     status?: string | null
     simulated?: boolean
     livemode?: boolean
-    payoutRail?: 'processor' | 'sandbox' | string | null
+    payoutRail?: 'bank_ach' | 'sandbox' | string | null
+    bankTransferId?: string | null
+    bankTransferStatus?: string | null
+    /** @deprecated Use bankTransferId. */
     processorTransferId?: string | null
+    /** @deprecated Use bankTransferStatus. */
     processorTransferStatus?: string | null
     webhookDeliveriesQueued?: number | null
     webhookDeliveriesDelivered?: number | null
@@ -1834,12 +2108,12 @@ export interface RefundResourceResponse {
     transactionId: string | null
     referenceId: string | null
     saleReference: string | null
-    refundedAmount: number | null
+    refundedAmountCents: number | null
     currency: string | null
     status: string | null
     breakdown: {
-      fromCreator: number
-      fromPlatform: number
+      fromCreatorCents: number
+      fromPlatformCents: number
     } | null
     isFullRefund: boolean | null
     repairPending?: boolean | null

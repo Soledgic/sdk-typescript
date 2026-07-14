@@ -6,7 +6,7 @@ for every sale, split, wallet balance, refund, and payout.
 ## First sandbox checkout in 2 minutes
 
 ```bash
-npm install @soledgic/sdk@0.5.3
+npm install @soledgic/sdk@0.7.1
 npx soledgic init                     # Browser auth → writes .env + a runnable test file
 node soledgic-test-checkout.mjs       # Runs a sandbox checkout end-to-end
 ```
@@ -92,6 +92,34 @@ Checkout sessions are USD-native today. Pass `currency: 'USD'` or omit currency
 to use the default; non-USD checkout currencies are rejected until Soledgic ships
 end-to-end multicurrency ledger and wallet support.
 
+### Buyer-funded hosted checkout
+
+Use the explicit wallet-funded method when a signed-in buyer needs to pay through
+the hosted processor and complete a purchase in one flow. It sets
+`purchase_mode: 'direct_funded_wallet'` for you, requires a non-empty
+`buyerUserId`, and does not send the buyer through creator or merchant onboarding.
+
+```ts
+const checkout = await soledgic.purchases.createWalletFundedCheckout({
+  creatorId: creator.participant.id,
+  buyerUserId: 'buyer_123',       // authenticated consumer id
+  externalUserId: 'customer_123', // your optional customer reference
+  externalOrderId: 'order_1002',  // safe retry/idempotency key
+  amount: 7999,
+  currency: 'USD',
+  productName: 'Digital book',
+  successUrl,
+  cancelUrl,
+})
+
+redirect(checkout.checkoutSession.checkoutUrl!)
+```
+
+`orders.createWalletFundedCheckout(req)` is an alias for integrations that use
+the `orders` namespace. Both methods serialize `buyer_user_id` and the canonical
+`direct_funded_wallet` purchase mode. Blank buyer ids are rejected before any
+network request is made.
+
 The wallet API is uniform across integrations, but balances remain scoped.
 Every wallet object belongs to one ledger, one owner, and one wallet type.
 Soledgic derives the organization from the API key's ledger, links wallet
@@ -158,11 +186,11 @@ await soledgic.kyc.submitCreator({
 | `wallets.withdraw(req)` | Withdraw from a wallet object |
 | `wallets.transfer(req)` | Move funds between wallets when transfer is permitted |
 | `holds.list(opts?)` | List held funds |
-| `holds.release(req)` | Release a hold and optionally execute the transfer |
+| `holds.release(req)` | Release held funds into the available balance; payouts are separate |
 
 Supported wallet types:
 
-- `consumer_credit`: closed-loop platform credits
+- `consumer_credit`: buyer stored balance for wallet-funded purchases
 - `creator_earnings`: payout-eligible seller or creator proceeds
 
 `wallets.create` currently provisions scoped consumer-credit wallets. Creator
@@ -215,7 +243,9 @@ await soledgic.walletSessions.create({
 | Method | Description |
 | --- | --- |
 | `orders.createCheckout(req)` | Create hosted or direct checkout flows for an order |
+| `orders.createWalletFundedCheckout(req)` | Alias for the explicit buyer-funded hosted checkout |
 | `purchases.create(req)` | Create a purchase checkout flow |
+| `purchases.createWalletFundedCheckout(req)` | Create a hosted buyer payment that funds and spends the buyer wallet atomically |
 | `payouts.request(req)` | Create a payout request |
 | `payouts.getEligibility(creatorId)` | Check creator payout readiness |
 | `refunds.request(req)` | Request a refund through Soledgic |
