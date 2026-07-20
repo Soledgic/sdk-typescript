@@ -1907,14 +1907,13 @@ describe('Soledgic SDK', () => {
     const sdk = createClient(fn)
     const result = await sdk.createParticipant({
       participantId: 'p_1',
-      userId: '550e8400-e29b-41d4-a716-446655440000',
       displayName: 'Alice',
       email: 'alice@example.com',
     })
 
     const body = JSON.parse(fn.mock.calls[0][1].body)
     expect(body.participant_id).toBe('p_1')
-    expect(body.user_id).toBe('550e8400-e29b-41d4-a716-446655440000')
+    expect(body.user_id).toBeUndefined()
     expect(result.participant.accountId).toBe('acct_1')
     expect(result.participant.linkedUserId).toBe('550e8400-e29b-41d4-a716-446655440000')
     expect(result.participant.displayName).toBe('Alice')
@@ -3209,6 +3208,7 @@ describe('Soledgic SDK', () => {
       legalName: 'Jane Doe',
       taxIdType: 'ssn',
       taxIdLast4: '1234',
+      taxIdFull: '123451234',
       businessType: 'individual',
       address: {
         line1: '123 Main St',
@@ -3218,19 +3218,39 @@ describe('Soledgic SDK', () => {
         country: 'US',
       },
       certify: true,
+      idempotencyKey: 'tax-attempt-1',
     })
 
     const [url, opts] = fn.mock.calls[0]
     expect(url).toContain('/submit-tax-info')
     const body = JSON.parse(opts.body)
     expect(body.participant_id).toBe('p_1')
+    expect(body.user_id).toBeUndefined()
     expect(body.legal_name).toBe('Jane Doe')
     expect(body.tax_id_type).toBe('ssn')
     expect(body.tax_id_last4).toBe('1234')
+    expect(body.tax_id_full).toBe('123451234')
     expect(body.business_type).toBe('individual')
     expect(body.certify).toBe(true)
+    expect(body.idempotency_key).toBe('tax-attempt-1')
     expect(body.address.line1).toBe('123 Main St')
     expect(body.address.postal_code).toBe('94102')
+  })
+
+  it('submitTaxInfo rejects a full TIN without an idempotency key before sending it', async () => {
+    const fn = mockFetch({ success: true })
+    const sdk = createClient(fn)
+
+    await expect(sdk.submitTaxInfo({
+      participantId: 'p_1',
+      legalName: 'Jane Doe',
+      taxIdType: 'ssn',
+      taxIdLast4: '1234',
+      taxIdFull: '123451234',
+      businessType: 'individual',
+      certify: true,
+    } as any)).rejects.toThrow('idempotencyKey is required when taxIdFull is provided')
+    expect(fn).not.toHaveBeenCalled()
   })
 
   it('kyc.submitBusiness sends bundled KYB profile and document evidence', async () => {
@@ -3263,6 +3283,7 @@ describe('Soledgic SDK', () => {
         documentType: 'ein_letter',
         providerDocumentId: 'doc_ein_1',
       }],
+      idempotencyKey: 'business-kyb-1',
     })
 
     const [url, opts] = fn.mock.calls[0]
@@ -3275,6 +3296,7 @@ describe('Soledgic SDK', () => {
     expect(body.business_address.postal_code).toBe('10001')
     expect(body.beneficial_owners[0].ownership_percent).toBe(75)
     expect(body.document_evidence[0].provider_document_id).toBe('doc_ein_1')
+    expect(body.idempotency_key).toBe('business-kyb-1')
   })
 
   it('kyc.submitCreator sends creator KYC to participant-scoped endpoint', async () => {
@@ -3298,7 +3320,7 @@ describe('Soledgic SDK', () => {
         documentType: 'government_id',
         providerDocumentId: 'doc_id_1',
       }],
-      certifyTaxInfo: true,
+      idempotencyKey: 'creator-kyc-1',
     })
 
     const [url, opts] = fn.mock.calls[0]
@@ -3309,7 +3331,107 @@ describe('Soledgic SDK', () => {
     expect(body.date_of_birth).toBe('1990-01-01')
     expect(body.address.postal_code).toBe('11201')
     expect(body.document_evidence[0].document_type).toBe('government_id')
-    expect(body.certify_tax_info).toBe(true)
+    expect(body.certify_tax_info).toBeUndefined()
+    expect(body.tax_id_full).toBeUndefined()
+    expect(body.idempotency_key).toBe('creator-kyc-1')
+  })
+
+  it('kyc.submitCreator rejects fileUrl evidence without an idempotency key before sending', async () => {
+    const fn = mockFetch({ success: true })
+    const sdk = createClient(fn)
+
+    await expect(sdk.kyc.submitCreator({
+      participantId: 'creator_1',
+      legalName: 'Creator One',
+      email: 'creator@example.com',
+      dateOfBirth: '1990-01-01',
+      address: {
+        line1: '200 Main St',
+        city: 'Brooklyn',
+        state: 'NY',
+        postalCode: '11201',
+        country: 'US',
+      },
+      documentEvidence: [{
+        documentType: 'government_id',
+        fileName: 'creator-id.pdf',
+        fileUrl: 'https://evidence.example/creator-id.pdf',
+      }],
+    })).rejects.toThrow('idempotencyKey is required when creator documentEvidence contains fileUrl')
+    expect(fn).not.toHaveBeenCalled()
+  })
+
+  it('kyc.submitCreator rejects tax certification and directs callers to hosted verification', async () => {
+    const fn = mockFetch({ success: true })
+    const sdk = createClient(fn)
+
+    await expect(sdk.kyc.submitCreator({
+      participantId: 'creator_1',
+      legalName: 'Creator One',
+      email: 'creator@example.com',
+      dateOfBirth: '1990-01-01',
+      address: {},
+      documentEvidence: [],
+      certifyTaxInfo: true,
+      idempotencyKey: 'creator-certification-1',
+    } as any)).rejects.toThrow(
+      'Creator tax certification requires a hosted verification session; use createCreatorVerificationSession',
+    )
+    expect(fn).not.toHaveBeenCalled()
+  })
+
+  it('kyc.submitCreator rejects a full TIN and directs callers to hosted verification', async () => {
+    const fn = mockFetch({ success: true })
+    const sdk = createClient(fn)
+
+    await expect(sdk.kyc.submitCreator({
+      participantId: 'creator_1',
+      legalName: 'Creator One',
+      email: 'creator@example.com',
+      dateOfBirth: '1990-01-01',
+      taxIdFull: '123451234',
+      address: {},
+      documentEvidence: [],
+    } as any)).rejects.toThrow(
+      'Creator tax certification requires a hosted verification session; use createCreatorVerificationSession',
+    )
+    expect(fn).not.toHaveBeenCalled()
+  })
+
+  it('kyc.createCreatorVerificationSession sends the hosted-session contract', async () => {
+    const fn = mockFetch({
+      success: true,
+      creator_verification_session: {
+        id: '880e8400-e29b-41d4-a716-446655440000',
+        object: 'creator_verification_session',
+        participant_id: 'creator_1',
+        status: 'pending',
+        url: 'https://soledgic.com/verify/creator/880e8400-e29b-41d4-a716-446655440000#token=cvrs_secret',
+        client_secret: 'cvrs_secret',
+        return_url: 'https://booklyverse.example/verification',
+        expires_at: '2026-07-18T13:00:00.000Z',
+        created_at: '2026-07-18T12:30:00.000Z',
+        metadata: {},
+      },
+    })
+    const sdk = createClient(fn)
+
+    await sdk.kyc.createCreatorVerificationSession({
+      participantId: 'creator/with space',
+      returnUrl: 'https://booklyverse.example/verification',
+      expiresInMinutes: 45,
+      idempotencyKey: 'creator_1_verification_attempt_1',
+      metadata: { source: 'creator_settings' },
+    })
+
+    const [url, opts] = fn.mock.calls[0]
+    expect(String(url)).toContain('/kyc/creators/creator%2Fwith%20space/verification-sessions')
+    expect(opts.method).toBe('POST')
+    const body = JSON.parse(opts.body)
+    expect(body.return_url).toBe('https://booklyverse.example/verification')
+    expect(body.expires_in_minutes).toBe(45)
+    expect(body.idempotency_key).toBe('creator_1_verification_attempt_1')
+    expect(body.metadata).toEqual({ source: 'creator_settings' })
   })
 
   it('kyc status helpers use GET endpoints', async () => {
@@ -3838,9 +3960,10 @@ describe('Soledgic SDK', () => {
           primaryContact: { name: 'Alex', email: 'alex@example.com' },
           businessAddress: { line1: '100 Main', city: 'NYC', state: 'NY', postalCode: '10001', country: 'US' },
           documentEvidence: [{ documentType: 'ein_letter', providerDocumentId: 'doc_1' }],
+          idempotencyKey: 'business_kyb_attempt_1',
         }),
         endpoint: 'kyc/business',
-        bodyKeys: ['business_type', 'legal_name', 'primary_contact', 'business_address', 'document_evidence'],
+        bodyKeys: ['business_type', 'legal_name', 'primary_contact', 'business_address', 'document_evidence', 'idempotency_key'],
       },
       {
         name: 'submitCreatorKyc',
@@ -3854,6 +3977,16 @@ describe('Soledgic SDK', () => {
         }),
         endpoint: 'kyc/creators/creator_1',
         bodyKeys: ['legal_name', 'email', 'date_of_birth', 'address', 'document_evidence'],
+      },
+      {
+        name: 'createCreatorVerificationSession',
+        call: (sdk) => sdk.createCreatorVerificationSession({
+          participantId: 'creator_1',
+          returnUrl: 'https://creators.example/verification',
+          idempotencyKey: 'verify_creator_1',
+        }),
+        endpoint: 'kyc/creators/creator_1/verification-sessions',
+        bodyKeys: ['return_url', 'idempotency_key'],
       },
       {
         name: 'createBudget',
@@ -4508,7 +4641,7 @@ describe('Soledgic SDK', () => {
       expect(result.totals.participantsRequiring1099).toBe(1)
     })
 
-    it('createParticipant maps nested participant with tax_info', async () => {
+    it('createParticipant maps nested participant and safe payout preferences', async () => {
       const fn = mockFetch({
         success: true,
         participant: { id: 'c1', account_id: 'acct_1', created: false, identity_link_id: 'link_1', identity_link_status: 'pending', display_name: 'Jane', email: 'j@test.com', default_split_percent: 80, payout_preferences: { schedule: 'weekly' }, created_at: '2026-01-01' },
@@ -4527,18 +4660,15 @@ describe('Soledgic SDK', () => {
       expect(result.participant.payoutPreferences).toEqual({ schedule: 'weekly' })
       expect(result.participant.createdAt).toBe('2026-01-01')
 
-      // Verify tax_info snake_case mapping in request body
+      // Tax and bank details use hosted verification; participant creation
+      // serializes only the safe payout schedule preferences.
       const fn2 = mockFetch({ success: true, participant: {} })
       const sdk2 = createClient(fn2)
       await sdk2.createParticipant({ participantId: 'c2',
-        taxInfo: { taxIdType: 'ein', taxIdLast4: '5678', legalName: 'Corp', businessType: 'llc', address: { line1: '123 St', city: 'NY', state: 'NY', postalCode: '10001', country: 'US' } },
-        payoutPreferences: { schedule: 'monthly', minimumAmount: 5000, method: 'card' },
+        payoutPreferences: { schedule: 'monthly', minimumAmount: 5000 },
       })
       const body = JSON.parse(fn2.mock.calls[0][1].body)
-      expect(body.tax_info.tax_id_type).toBe('ein')
-      expect(body.tax_info.tax_id_last4).toBe('5678')
-      expect(body.tax_info.legal_name).toBe('Corp')
-      expect(body.tax_info.address.postal_code).toBe('10001')
+      expect(body.tax_info).toBeUndefined()
       expect(body.payout_preferences.minimum_amount).toBe(5000)
     })
 
@@ -8982,46 +9112,23 @@ describe('Soledgic SDK', () => {
       expect(url).toContain('breakdown=monthly')
     })
 
-    // --- client.ts: createParticipant with taxInfo and payout preferences ---
+    // --- client.ts: createParticipant payout preferences ---
 
-    it('createParticipant maps taxInfo to snake_case', async () => {
+    it('createParticipant maps payout preferences without tax or bank data', async () => {
       const fn = mockFetch({ success: true, participant: { id: 'p_tax' } })
       const sdk = createClient(fn)
       await sdk.createParticipant({
         participantId: 'p_tax',
-        taxInfo: {
-          taxIdType: 'ein',
-          taxIdLast4: '9999',
-          legalName: 'Corp LLC',
-          businessType: 'llc',
-          address: {
-            line1: '100 Main',
-            line2: 'Floor 2',
-            city: 'NYC',
-            state: 'NY',
-            postalCode: '10001',
-            country: 'US',
-          },
-        },
         payoutPreferences: {
           schedule: 'weekly',
           minimumAmount: 1000,
-          method: 'ach',
         },
       })
 
       const body = JSON.parse(fn.mock.calls[0][1].body)
-      expect(body.tax_info.tax_id_type).toBe('ein')
-      expect(body.tax_info.tax_id_last4).toBe('9999')
-      expect(body.tax_info.legal_name).toBe('Corp LLC')
-      expect(body.tax_info.business_type).toBe('llc')
-      expect(body.tax_info.address.line1).toBe('100 Main')
-      expect(body.tax_info.address.line2).toBe('Floor 2')
-      expect(body.tax_info.address.city).toBe('NYC')
-      expect(body.tax_info.address.postal_code).toBe('10001')
+      expect(body.tax_info).toBeUndefined()
       expect(body.payout_preferences.schedule).toBe('weekly')
       expect(body.payout_preferences.minimum_amount).toBe(1000)
-      expect(body.payout_preferences.method).toBe('ach')
     })
 
     // --- client.ts: createLedger does not serialize retired request bodies ---

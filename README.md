@@ -6,7 +6,7 @@ for every sale, split, wallet balance, refund, and payout.
 ## First sandbox checkout in 2 minutes
 
 ```bash
-npm install @soledgic/sdk@0.7.1
+npm install @soledgic/sdk@0.8.0
 npx soledgic init                     # Browser auth → writes .env + a runnable test file
 node soledgic-test-checkout.mjs       # Runs a sandbox checkout end-to-end
 ```
@@ -62,8 +62,8 @@ const userWallet = await soledgic.users.upsertWallet({
 
 const creator = await soledgic.creators.upsert({
   externalCreatorId: 'creator_456',
-  userId: '9f9b62d2-2f32-4b20-bc24-1f86b16cb9eb',
   displayName: 'Jane Creator',
+  email: 'jane@example.com',
   defaultSplitPercent: 80,
 })
 
@@ -141,12 +141,23 @@ usage to that organization server-side, and does not accept a client-supplied
 | `kyc.getBusiness()` | Get business KYB status |
 | `kyc.submitCreator(req)` | Submit creator KYC bound to a participant |
 | `kyc.getCreator(participantId)` | Get creator KYC status |
+| `kyc.createCreatorVerificationSession(req)` | Create a short-lived hosted creator-verification link |
 
-`creators.upsert` accepts an optional `userId` so a public creator can be linked to a shared identity record without exposing the operator APIs directly.
+When `creators.upsert` includes an email, Soledgic creates a pending identity
+invite. The creator must verify and accept it before the participant is linked.
+This does not create a consumer wallet; call `users.upsertWallet` separately
+only when that person opts into the buyer experience.
 
 KYC/KYB submission stores a review packet and updates the existing status gates;
 it does not approve verification by itself. Creator packets are anchored to the
-participant `creator_balance`, not the consumer wallet:
+participant `creator_balance`, not the consumer wallet. Business KYB writes
+require a stable `idempotencyKey`; exact retries replay without duplicating the
+review packet, retained evidence, or Vault secret. Creator `fileUrl` evidence
+also requires a stable key so retries reuse one private compliance-document
+reference and reject changed evidence metadata or bytes. Full TIN collection
+and creator tax certification are deliberately excluded from
+`kyc.submitCreator`; create a hosted verification session so the signed-in,
+verified creator is the actor who certifies that information:
 
 ```ts
 await soledgic.kyc.submitCreator({
@@ -165,9 +176,10 @@ await soledgic.kyc.submitCreator({
   },
   documentEvidence: [{
     documentType: 'government_id',
-    providerDocumentId: 'persona_doc_123',
+    fileName: 'government-id.pdf',
+    fileUrl: 'https://files.example.com/government-id.pdf',
   }],
-  certifyTaxInfo: true,
+  idempotencyKey: 'creator_456_kyc_attempt_1',
 })
 ```
 

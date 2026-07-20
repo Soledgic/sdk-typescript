@@ -1,6 +1,6 @@
 {
   "name": "@soledgic/sdk",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Platform payment infrastructure SDK for creator economy platforms — live ledger layer for payments, wallets, revenue splits, payouts, refunds, and webhooks",
   "main": "dist/index.js",
   "module": "dist/index.mjs",

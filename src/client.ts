@@ -148,6 +148,8 @@ import type {
   SubmitTaxInfoRequest,
   SubmitBusinessKybRequest,
   SubmitCreatorKycRequest,
+  CreateCreatorVerificationSessionRequest,
+  CreateCreatorVerificationSessionResponse,
   BusinessKybResponse,
   CreatorKycResponse,
   KycAddress,
@@ -163,7 +165,7 @@ import { buildSandboxScenarioPayload } from './testing'
 
 export const DEFAULT_API_VERSION = '2026-03-01'
 export const DEFAULT_BASE_URL = 'https://api.soledgic.com/v1'
-export const SOLEDGIC_SDK_VERSION = '0.7.1'
+export const SOLEDGIC_SDK_VERSION = '0.8.0'
 const API_KEY_PATTERN = /^slk_(test|live)_[A-Za-z0-9]{16,}$/
 
 export function normalizeBaseUrl(input?: string): string {
@@ -403,11 +405,9 @@ export class Soledgic {
      */
     upsert: (req: UpsertCreatorRequest) => this.createParticipant({
       participantId: req.externalCreatorId,
-      userId: req.userId,
       displayName: req.displayName,
       email: req.email,
       defaultSplitPercent: req.defaultSplitPercent,
-      taxInfo: req.taxInfo,
       payoutPreferences: req.payoutPreferences,
       metadata: {
         ...req.metadata,
@@ -749,6 +749,14 @@ export class Soledgic {
      * on `kyc.getCreator` status rather than asking again on every visit.
      */
     submitCreator: (req: SubmitCreatorKycRequest) => this.submitCreatorKyc(req),
+
+    /**
+     * Create a short-lived hosted verification capability for a creator.
+     * Send the returned URL to the creator; never expose your API key or log
+     * the one-time client secret embedded in the URL fragment.
+     */
+    createCreatorVerificationSession: (req: CreateCreatorVerificationSessionRequest) =>
+      this.createCreatorVerificationSession(req),
   }
 
   /**
@@ -2047,28 +2055,12 @@ export class Soledgic {
   async createParticipant(req: CreateParticipantRequest): Promise<CreateParticipantResponse> {
     const response = await this.request<any>('participants', {
       participant_id: req.participantId,
-      user_id: req.userId,
       display_name: req.displayName,
       email: req.email,
       default_split_percent: req.defaultSplitPercent,
-      tax_info: req.taxInfo ? {
-        tax_id_type: req.taxInfo.taxIdType,
-        tax_id_last4: req.taxInfo.taxIdLast4,
-        legal_name: req.taxInfo.legalName,
-        business_type: req.taxInfo.businessType,
-        address: req.taxInfo.address ? {
-          line1: req.taxInfo.address.line1,
-          line2: req.taxInfo.address.line2,
-          city: req.taxInfo.address.city,
-          state: req.taxInfo.address.state,
-          postal_code: req.taxInfo.address.postalCode,
-          country: req.taxInfo.address.country,
-        } : undefined,
-      } : undefined,
       payout_preferences: req.payoutPreferences ? {
         schedule: req.payoutPreferences.schedule,
         minimum_amount: req.payoutPreferences.minimumAmount,
-        method: req.payoutPreferences.method,
       } : undefined,
       metadata: req.metadata,
     })
@@ -3780,11 +3772,15 @@ export class Soledgic {
   // === TAX INFO ===
 
   async submitTaxInfo(req: SubmitTaxInfoRequest) {
+    if (req.taxIdFull && !req.idempotencyKey) {
+      throw new Error('idempotencyKey is required when taxIdFull is provided')
+    }
     return this.request<any>('submit-tax-info', {
       participant_id: req.participantId,
       legal_name: req.legalName,
       tax_id_type: req.taxIdType,
       tax_id_last4: req.taxIdLast4,
+      tax_id_full: req.taxIdFull,
       business_type: req.businessType,
       address: req.address ? {
         line1: req.address.line1,
@@ -3795,6 +3791,7 @@ export class Soledgic {
         country: req.address.country,
       } : undefined,
       certify: req.certify,
+      idempotency_key: req.idempotencyKey,
     })
   }
 
@@ -3819,6 +3816,7 @@ export class Soledgic {
       business_address: mapKycAddress(req.businessAddress),
       beneficial_owners: mapBeneficialOwners(req.beneficialOwners),
       document_evidence: mapKycDocumentEvidence(req.documentEvidence),
+      idempotency_key: req.idempotencyKey,
       submit_for_review: req.submitForReview,
       metadata: req.metadata,
     })
@@ -3829,6 +3827,24 @@ export class Soledgic {
   }
 
   async submitCreatorKyc(req: SubmitCreatorKycRequest): Promise<CreatorKycResponse> {
+    const internalOnlyTaxFields = req as SubmitCreatorKycRequest & {
+      certifyTaxInfo?: unknown
+      taxIdFull?: unknown
+    }
+    if (
+      internalOnlyTaxFields.certifyTaxInfo !== undefined ||
+      internalOnlyTaxFields.taxIdFull !== undefined
+    ) {
+      throw new Error(
+        'Creator tax certification requires a hosted verification session; use createCreatorVerificationSession',
+      )
+    }
+    const hasFileUrlEvidence = req.documentEvidence.some(
+      (document) => typeof document.fileUrl === 'string' && document.fileUrl.trim().length > 0,
+    )
+    if (hasFileUrlEvidence && !req.idempotencyKey?.trim()) {
+      throw new Error('idempotencyKey is required when creator documentEvidence contains fileUrl')
+    }
     return this.request<CreatorKycResponse>(`kyc/creators/${encodeURIComponent(req.participantId)}`, {
       legal_name: req.legalName,
       display_name: req.displayName,
@@ -3836,14 +3852,27 @@ export class Soledgic {
       date_of_birth: req.dateOfBirth,
       tax_id_type: req.taxIdType,
       tax_id_last4: req.taxIdLast4,
-      tax_id_full: req.taxIdFull,
       business_type: req.businessType,
       address: mapKycAddress(req.address),
       document_evidence: mapKycDocumentEvidence(req.documentEvidence),
-      certify_tax_info: req.certifyTaxInfo,
+      idempotency_key: req.idempotencyKey,
       submit_for_review: req.submitForReview,
       metadata: req.metadata,
     })
+  }
+
+  async createCreatorVerificationSession(
+    req: CreateCreatorVerificationSessionRequest,
+  ): Promise<CreateCreatorVerificationSessionResponse> {
+    return this.request<CreateCreatorVerificationSessionResponse>(
+      `kyc/creators/${encodeURIComponent(req.participantId)}/verification-sessions`,
+      {
+        return_url: req.returnUrl,
+        expires_in_minutes: req.expiresInMinutes,
+        idempotency_key: req.idempotencyKey,
+        metadata: req.metadata,
+      },
+    )
   }
 
   // === BANK STATEMENT IMPORT ===

@@ -463,34 +463,16 @@ export interface BackdatePolicyRequest {
   blockPriorQuarter?: boolean
 }
 
-export interface ParticipantTaxInfo {
-  taxIdType?: 'ssn' | 'ein' | 'itin'
-  taxIdLast4?: string
-  legalName?: string
-  businessType?: 'individual' | 'sole_proprietor' | 'llc' | 'corporation' | 'partnership'
-  address?: {
-    line1?: string
-    line2?: string
-    city?: string
-    state?: string
-    postalCode?: string
-    country?: string
-  }
-}
-
 export interface ParticipantPayoutPreferences {
   schedule?: 'manual' | 'weekly' | 'biweekly' | 'monthly'
   minimumAmount?: number
-  method?: 'ach' | 'card' | 'manual'
 }
 
 export interface CreateParticipantRequest {
   participantId: string
-  userId?: string
   displayName?: string
   email?: string
   defaultSplitPercent?: number
-  taxInfo?: ParticipantTaxInfo
   payoutPreferences?: ParticipantPayoutPreferences
   metadata?: Record<string, unknown>
 }
@@ -1039,11 +1021,10 @@ export interface UpsertUserWalletRequest {
 export interface UpsertCreatorRequest {
   /** Your app's stable creator/seller id. */
   externalCreatorId: string
-  userId?: string
   displayName?: string
+  /** Creates a pending identity invite. Exact upsert retries preserve the delivered invite; no consumer wallet is created. */
   email?: string
   defaultSplitPercent?: number
-  taxInfo?: ParticipantTaxInfo
   payoutPreferences?: ParticipantPayoutPreferences
   metadata?: Record<string, unknown>
 }
@@ -1187,7 +1168,7 @@ export interface CreateBankAccountRequest {
   accountLastFour?: string
 }
 
-export interface SubmitTaxInfoRequest {
+interface SubmitTaxInfoRequestBase {
   participantId: string
   legalName: string
   taxIdType: 'ssn' | 'ein' | 'itin'
@@ -1203,6 +1184,20 @@ export interface SubmitTaxInfoRequest {
   }
   certify: boolean
 }
+
+export type SubmitTaxInfoRequest = SubmitTaxInfoRequestBase & (
+  | {
+      /** Full 9-digit TIN, stored only through Soledgic Vault's atomic tax RPC. */
+      taxIdFull: string
+      /** Required with taxIdFull so an ambiguous retry cannot create another Vault secret or certification. */
+      idempotencyKey: string
+    }
+  | {
+      taxIdFull?: undefined
+      /** Optional for a last-four-only certification. */
+      idempotencyKey?: string
+    }
+)
 
 export type KycStatus = 'pending' | 'under_review' | 'approved' | 'rejected' | 'suspended'
 export type KycTaxIdType = 'ssn' | 'ein' | 'itin'
@@ -1230,6 +1225,7 @@ export interface KycAddress {
 export interface KycDocumentEvidence {
   documentType: KycDocumentType
   fileName?: string
+  /** HTTPS source copied into private compliance storage. Creator KYC requires idempotencyKey when this is set. */
   fileUrl?: string
   providerDocumentId?: string
   processorVerificationId?: string
@@ -1259,11 +1255,14 @@ export interface SubmitBusinessKybRequest {
   legalName: string
   taxIdType?: KycTaxIdType
   taxIdLast4?: string
+  /** Optional full TIN. Stored only through the atomic Vault/KYB transaction and never returned. */
   taxIdFull?: string
   primaryContact: BusinessKybPrimaryContact
   businessAddress: KycAddress
   beneficialOwners?: BusinessKybBeneficialOwner[]
   documentEvidence: KycDocumentEvidence[]
+  /** Stable key for retrying this exact KYB draft or review submission. */
+  idempotencyKey: string
   /** Defaults to true. When false, Soledgic stores a pending draft instead of marking KYB under review. */
   submitForReview?: boolean
   metadata?: Record<string, unknown>
@@ -1277,15 +1276,51 @@ export interface SubmitCreatorKycRequest {
   dateOfBirth: string
   taxIdType?: KycTaxIdType
   taxIdLast4?: string
-  taxIdFull?: string
   businessType?: CreatorKycBusinessType
   address: KycAddress
   documentEvidence: KycDocumentEvidence[]
-  /** Certifies the shared creator tax profile when an active participant identity link exists. */
-  certifyTaxInfo?: boolean
+  /** Stable retry key. Required at runtime when any document evidence uses fileUrl. */
+  idempotencyKey?: string
   /** Defaults to true. When false, Soledgic stores a pending draft instead of marking KYC under review. */
   submitForReview?: boolean
   metadata?: Record<string, unknown>
+}
+
+export interface CreateCreatorVerificationSessionRequest {
+  participantId: string
+  /** Optional post-verification destination on an HTTPS origin registered to your organization. */
+  returnUrl?: string
+  /** Session lifetime from 5 to 60 minutes. Defaults to 30. */
+  expiresInMinutes?: number
+  /** Stable key for safely retrying the same session creation request. */
+  idempotencyKey?: string
+  metadata?: Record<string, unknown>
+}
+
+export type CreatorVerificationSessionStatus =
+  | 'pending'
+  | 'consumed'
+  | 'completed'
+  | 'expired'
+  | 'revoked'
+
+export interface CreateCreatorVerificationSessionResponse {
+  success: boolean
+  already_exists?: boolean
+  creator_verification_session: {
+    id: string
+    object: 'creator_verification_session'
+    participant_id: string
+    status: CreatorVerificationSessionStatus
+    /** Hosted URL. The one-time client secret is carried in the URL fragment, not the request path. */
+    url: string
+    /** One-time secret returned only by this API. Never log or persist it. */
+    client_secret: string
+    return_url: string | null
+    expires_at: string
+    created_at: string
+    metadata: Record<string, unknown>
+  }
 }
 
 export interface KycSubmissionSummary {
