@@ -6,7 +6,7 @@ for every sale, split, wallet balance, refund, and payout.
 ## First sandbox checkout in 2 minutes
 
 ```bash
-npm install @soledgic/sdk@0.8.0
+npm install @soledgic/sdk@0.8.1
 npx soledgic init                     # Browser auth → writes .env + a runnable test file
 node soledgic-test-checkout.mjs       # Runs a sandbox checkout end-to-end
 ```
