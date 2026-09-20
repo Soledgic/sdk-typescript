@@ -92,12 +92,11 @@ export type SandboxWebhookEventType =
   | 'chargeback.created'
   | 'chargeback.funds_withdrawn'
   | 'hold.created'
-  | 'hold.released'
-  | 'hold.failed'
   | 'refund_request.created'
   | 'refund_request.completed'
   | 'refund_request.rejected'
   | 'refund_request.cancelled'
+  | 'refund_request.failed'
   | 'payout_request.created'
   | 'payout_request.approved'
   | 'payout_request.rejected'
@@ -121,8 +120,6 @@ export type SandboxScenarioType =
   | 'chargeback.created'
   | 'chargeback.funds_withdrawn'
   | 'hold.created'
-  | 'hold.released'
-  | 'hold.failed'
 
 export interface SandboxScenarioRequest {
   idempotencyKey: string
@@ -667,6 +664,13 @@ export type CreateCheckoutSessionRequest = {
   participantId: string
   amount: number
   currency?: 'USD'
+  /**
+   * Select the settlement rail. `card` is the existing processor-hosted path.
+   * `usdc` returns an exact Base USDC transaction and settles directly to the
+   * creator/platform destinations after chain finality; it cannot be combined
+   * with paymentMethodId, purchaseMode, or holdFunds.
+   */
+  paymentRail?: 'card' | 'usdc'
   productId?: string
   productName?: string
   /** Customer email for hosted display/receipts. Sandbox buyer sessions can use this alone to derive a stable test wallet. */
@@ -879,8 +883,6 @@ export interface ListRefundRequestsParams {
 export interface ReviewRefundRequestParams {
   refundRequestId: string
   reason?: string
-  reviewedByUserId?: string
-  reviewedByActor?: string
   metadata?: Record<string, unknown>
 }
 
@@ -1041,6 +1043,8 @@ type UniversalCheckoutBaseRequest = {
   creatorId: string
   amount: number
   currency?: string
+  /** Choose `usdc` for direct Base settlement; defaults to the card rail. */
+  paymentRail?: 'card' | 'usdc'
   /** Your app's stable product/session id, mapped to product_id. */
   externalProductId?: string
   productName?: string
@@ -2085,7 +2089,32 @@ export interface CheckoutSessionResourceResponse {
     holdId: string | null
     paymentHoldId: string | null
     breakdown: CheckoutBreakdown | null
+    chain: {
+      chainId: number
+      token: 'USDC' | string
+      tokenAddress: string
+      routerAddress: string
+      checkoutReference: string
+      grossUnits: string
+      transactionData: string
+      paymentUri: string | null
+      txHash: string | null
+      settlementTransactionId: string | null
+      status: string
+    } | null
   }
+}
+
+export interface ClaimCheckoutSessionPaymentResponse {
+  success: boolean
+  status: 'pending_finality' | 'completed' | string
+  checkoutSessionId: string
+  txHash: string
+  blockNumber: string | null
+  finalizedBlockNumber: string | null
+  saleTransactionId: string | null
+  settlementTransactionId: string | null
+  alreadyExists: boolean
 }
 
 export interface WalletSessionObject {

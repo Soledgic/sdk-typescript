@@ -14,12 +14,11 @@ export const SOLEDGIC_SANDBOX_WEBHOOK_EVENTS = [
   'chargeback.created',
   'chargeback.funds_withdrawn',
   'hold.created',
-  'hold.released',
-  'hold.failed',
   'refund_request.created',
   'refund_request.completed',
   'refund_request.rejected',
   'refund_request.cancelled',
+  'refund_request.failed',
   'payout_request.created',
   'payout_request.approved',
   'payout_request.rejected',
@@ -245,8 +244,6 @@ export function buildSandboxScenarioPayload(input: SandboxScenarioPayloadInput):
         chargeback_status: input.scenario === 'chargeback.created' ? 'created' : 'funds_withdrawn',
       }
     case 'hold.created':
-    case 'hold.released':
-    case 'hold.failed':
       return {
         ...common,
         hold_id: scenarioResourceId('hold', input),

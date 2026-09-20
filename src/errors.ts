@@ -42,3 +42,15 @@ export class ConflictError extends SoledgicError {
     this.name = 'ConflictError'
   }
 }
+
+export class RateLimitError extends SoledgicError {
+  constructor(
+    message: string = 'Rate limit exceeded',
+    public retryAfterSeconds?: number,
+    details?: unknown,
+    code = 'RATE_LIMITED',
+  ) {
+    super(message, 429, details, code)
+    this.name = 'RateLimitError'
+  }
+}

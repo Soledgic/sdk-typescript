@@ -1,6 +1,6 @@
 {
   "name": "@soledgic/sdk",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Platform payment infrastructure SDK for creator economy platforms — live ledger layer for payments, wallets, revenue splits, payouts, refunds, and webhooks",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -32,7 +32,7 @@
     "url": "https://soledgic.com/support"
   },
   "scripts": {
-    "build": "tsup src/index.ts src/cli.ts --format cjs,esm --dts && chmod +x dist/cli.js",
+    "build": "tsup src/index.ts src/cli.ts --format cjs,esm --dts && node scripts/mark-cli-executable.mjs",
     "dev": "tsup src/index.ts src/cli.ts --format cjs,esm --dts --watch",
     "test": "vitest run",
     "type-check": "tsc --noEmit",

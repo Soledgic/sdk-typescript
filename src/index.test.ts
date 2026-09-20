@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { Soledgic, SoledgicError, ValidationError, AuthenticationError, NotFoundError, ConflictError, mapWebhookEndpoint, mapWebhookDelivery, timingSafeEqual, webhookPayloadToString, isArrayBufferView, parseWebhookSignatureHeader, parseWebhookEvent, hmacHex, verifyWebhookSignature, resolveWebhookEndpointUrl, normalizeBaseUrl, SOLEDGIC_SANDBOX_WEBHOOK_EVENTS, SOLEDGIC_SANDBOX_TEST_CARDS, SOLEDGIC_SDK_VERSION, buildSandboxRunMetadata, assertSandboxCheckoutCompleted, buildSandboxScenarioPayload, buildTestWebhook } from './index'
+import { Soledgic, SoledgicError, ValidationError, AuthenticationError, NotFoundError, ConflictError, RateLimitError, mapWebhookEndpoint, mapWebhookDelivery, timingSafeEqual, webhookPayloadToString, isArrayBufferView, parseWebhookSignatureHeader, parseWebhookEvent, hmacHex, verifyWebhookSignature, resolveWebhookEndpointUrl, normalizeBaseUrl, SOLEDGIC_SANDBOX_WEBHOOK_EVENTS, SOLEDGIC_SANDBOX_TEST_CARDS, SOLEDGIC_SDK_VERSION, buildSandboxRunMetadata, assertSandboxCheckoutCompleted, buildSandboxScenarioPayload, buildTestWebhook } from './index'
 
 const BASE_URL = 'https://test.supabase.co/functions/v1'
 const API_KEY = 'slk_test_examplekey000000'
@@ -1488,13 +1488,11 @@ describe('Soledgic SDK', () => {
     const sdk = createClient(approveFn)
     const approved = await sdk.refundRequests.approve({
       refundRequestId: 'rr_1',
-      reviewedByActor: 'support',
       metadata: { ticket_id: 'support_1' },
     })
 
     expect(String(approveFn.mock.calls[0][0])).toContain('/refund-requests/rr_1/approve')
     expect(JSON.parse(approveFn.mock.calls[0][1].body)).toMatchObject({
-      reviewed_by_actor: 'support',
       metadata: { ticket_id: 'support_1' },
     })
     expect(approved.refundRequest?.status).toBe('completed')
@@ -1502,11 +1500,10 @@ describe('Soledgic SDK', () => {
 
     const rejectFn = mockFetch({ success: true, refund_request: { id: 'rr_2', status: 'rejected', amount: 10, amount_cents: 1000, metadata: {} } })
     vi.stubGlobal('fetch', rejectFn)
-    await sdk.refundRequests.reject({ refundRequestId: 'rr_2', reason: 'Outside refund policy', reviewedByActor: 'support' })
+    await sdk.refundRequests.reject({ refundRequestId: 'rr_2', reason: 'Outside refund policy' })
     expect(String(rejectFn.mock.calls[0][0])).toContain('/refund-requests/rr_2/reject')
     expect(JSON.parse(rejectFn.mock.calls[0][1].body)).toMatchObject({
       reason: 'Outside refund policy',
-      reviewed_by_actor: 'support',
     })
 
     const cancelFn = mockFetch({ success: true, refund_request: { id: 'rr_3', status: 'cancelled', amount: 10, amount_cents: 1000, metadata: {} } })
@@ -1516,6 +1513,93 @@ describe('Soledgic SDK', () => {
     expect(JSON.parse(cancelFn.mock.calls[0][1].body)).toMatchObject({
       reason: 'Buyer withdrew request',
     })
+  })
+
+  it('createCheckoutSession maps exact USDC transaction terms and sends the rail', async () => {
+    const fn = mockFetch({
+      success: true,
+      checkout_session: {
+        id: '97200000-0000-4000-8000-000000000004',
+        mode: 'usdc',
+        provider: 'usdc',
+        checkout_url: 'https://pay.example.com/pay/97200000-0000-4000-8000-000000000004',
+        status: 'awaiting_payment',
+        requires_action: true,
+        amount: 1000,
+        currency: 'USD',
+        chain: {
+          chain_id: 84532,
+          token: 'USDC',
+          token_address: '0x3333333333333333333333333333333333333333',
+          router_address: '0x4444444444444444444444444444444444444444',
+          checkout_reference: `0x${'a'.repeat(64)}`,
+          gross_units: '10000000',
+          transaction_data: '0xabcdef',
+          payment_uri: 'ethereum:0x4444@84532/pay',
+          status: 'awaiting_payment',
+          tx_hash: null,
+          settlement_transaction_id: null,
+        },
+      },
+    })
+    const sdk = createClient(fn)
+    const result = await sdk.createCheckoutSession({
+      participantId: 'creator_1',
+      amount: 1000,
+      paymentRail: 'usdc',
+      successUrl: 'https://example.com/success',
+    })
+    expect(JSON.parse(fn.mock.calls[0][1].body).payment_rail).toBe('usdc')
+    expect(result.checkoutSession.chain).toMatchObject({
+      chainId: 84532,
+      token: 'USDC',
+      grossUnits: '10000000',
+      transactionData: '0xabcdef',
+      status: 'awaiting_payment',
+    })
+  })
+
+  it('claimCheckoutSessionPayment maps pending finality and rejects malformed hashes locally', async () => {
+    const txHash = `0x${'b'.repeat(64)}`
+    const fn = mockFetch({
+      success: true,
+      status: 'pending_finality',
+      checkout_session_id: '97200000-0000-4000-8000-000000000004',
+      tx_hash: txHash,
+      block_number: '100',
+      finalized_block_number: '98',
+    }, 202)
+    const sdk = createClient(fn)
+    const result = await sdk.claimCheckoutSessionPayment(
+      '97200000-0000-4000-8000-000000000004',
+      txHash,
+    )
+    expect(fn.mock.calls[0][0]).toContain('/checkout-sessions/97200000-0000-4000-8000-000000000004/claim')
+    expect(JSON.parse(fn.mock.calls[0][1].body)).toEqual({ tx_hash: txHash })
+    expect(result).toMatchObject({ status: 'pending_finality', blockNumber: '100', finalizedBlockNumber: '98' })
+    await expect(sdk.claimCheckoutSessionPayment('session', 'not-a-hash')).rejects.toThrow('32-byte')
+  })
+
+  it('createCheckoutSession rejects incompatible USDC options before the request', async () => {
+    const fn = mockFetch({})
+    const sdk = createClient(fn)
+    await expect(sdk.createCheckoutSession({
+      participantId: 'creator_1',
+      amount: 1000,
+      paymentRail: 'usdc',
+      paymentMethodId: 'pm_1',
+      idempotencyKey: 'checkout_1',
+    })).rejects.toThrow('USDC checkout cannot use')
+    expect(fn).not.toHaveBeenCalled()
+  })
+
+  it('RateLimitError exposes the server retry delay', () => {
+    const err = new RateLimitError('Slow down', 15, { bucket: 'payouts' })
+    expect(err).toBeInstanceOf(SoledgicError)
+    expect(err.status).toBe(429)
+    expect(err.name).toBe('RateLimitError')
+    expect(err.retryAfterSeconds).toBe(15)
+    expect(err.details).toEqual({ bucket: 'payouts' })
   })
 
   // === PAYOUT ===
@@ -2044,7 +2128,9 @@ describe('Soledgic SDK', () => {
 
   it('testing helpers build signed sandbox webhooks and assert checkout payloads', async () => {
     expect(SOLEDGIC_SANDBOX_WEBHOOK_EVENTS).toContain('dispute.created')
-    expect(SOLEDGIC_SANDBOX_WEBHOOK_EVENTS).toContain('hold.released')
+    expect(SOLEDGIC_SANDBOX_WEBHOOK_EVENTS).toContain('hold.created')
+    expect(SOLEDGIC_SANDBOX_WEBHOOK_EVENTS).toContain('refund_request.failed')
+    expect(SOLEDGIC_SANDBOX_WEBHOOK_EVENTS).not.toContain('hold.released')
     expect(SOLEDGIC_SANDBOX_WEBHOOK_EVENTS).toContain('membership.activated')
     expect(SOLEDGIC_SANDBOX_WEBHOOK_EVENTS).toContain('membership.expired')
     expect(SOLEDGIC_SANDBOX_WEBHOOK_EVENTS).toContain('payout.processing')
@@ -7399,6 +7485,45 @@ describe('Soledgic SDK', () => {
         expect.unreachable('should throw')
       } catch (err: any) {
         expect(err.message).toBe('Request failed: 503')
+      }
+    })
+
+    it('request surfaces a non-JSON upstream error without a JSON parse crash', async () => {
+      const fn = vi.fn().mockResolvedValue(new Response('Bad Gateway from CDN', {
+        status: 502,
+        headers: { 'content-type': 'text/plain' },
+      }))
+      const sdk = createClient(fn)
+
+      await expect(
+        sdk.createPayout({ participantId: 'p', amount: 100, referenceId: 'r' }),
+      ).rejects.toMatchObject({
+        name: 'SoledgicError',
+        status: 502,
+        message: 'Bad Gateway from CDN',
+      })
+    })
+
+    it('requestGet maps 429 and Retry-After to RateLimitError', async () => {
+      const fn = vi.fn().mockResolvedValue(new Response(
+        JSON.stringify({ error: 'Payout reads are throttled', error_code: 'rate_limited' }),
+        {
+          status: 429,
+          headers: {
+            'content-type': 'application/json',
+            'retry-after': '17',
+          },
+        },
+      ))
+      const sdk = createClient(fn)
+
+      try {
+        await sdk.getAPAging()
+        expect.unreachable('should throw')
+      } catch (err) {
+        expect(err).toBeInstanceOf(RateLimitError)
+        expect((err as RateLimitError).retryAfterSeconds).toBe(17)
+        expect((err as RateLimitError).code).toBe('rate_limited')
       }
     })
 

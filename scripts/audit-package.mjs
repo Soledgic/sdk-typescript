@@ -9,6 +9,8 @@ import { fileURLToPath } from 'node:url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const sdkRoot = resolve(__dirname, '..')
 const repoRoot = resolve(sdkRoot, '../..')
+const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+const npmOptions = process.platform === 'win32' ? { shell: true } : {}
 const rootPackagePath = resolve(repoRoot, 'package.json')
 const sdkPackagePath = resolve(sdkRoot, 'package.json')
 
@@ -52,9 +54,9 @@ const allowedPackedFilePatterns = [
 ]
 
 const packOutput = execFileSync(
-  'npm',
+  npmCommand,
   ['pack', '--dry-run', '--json', '--ignore-scripts', '--cache', resolve(tmpdir(), 'soledgic-sdk-pack-cache')],
-  { cwd: sdkRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+  { cwd: sdkRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...npmOptions },
 )
 const packed = JSON.parse(packOutput)[0]
 const packedFiles = packed.files.map((file) => file.path).sort()

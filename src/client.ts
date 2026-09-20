@@ -98,6 +98,7 @@ import type {
   CreateMembershipTierRequest,
   CreateCheckoutSessionRequest,
   CheckoutSessionResourceResponse,
+  ClaimCheckoutSessionPaymentResponse,
   CreateWalletSessionRequest,
   CreateWalletSessionResponse,
   CreatePayoutRequest,
@@ -158,7 +159,14 @@ import type {
   ImportBankStatementRequest,
   CheckoutBreakdown,
 } from './types'
-import { SoledgicError, ValidationError, AuthenticationError, NotFoundError, ConflictError } from './errors'
+import {
+  SoledgicError,
+  ValidationError,
+  AuthenticationError,
+  NotFoundError,
+  ConflictError,
+  RateLimitError,
+} from './errors'
 import { verifyWebhookSignature, parseWebhookEvent } from './webhooks'
 import { mapWebhookEndpoint, mapWebhookDelivery } from './helpers'
 import { buildSandboxScenarioPayload } from './testing'
@@ -462,6 +470,10 @@ export class Soledgic {
      * // Redirect buyer to session.checkoutSession.checkoutUrl
      */
     createCheckout: (req: UniversalCheckoutRequest) => this.createUniversalCheckout(req),
+
+    /** Verify a submitted USDC transaction and apply it once the block is finalized. */
+    claimUsdcPayment: (checkoutSessionId: string, txHash: string) =>
+      this.claimCheckoutSessionPayment(checkoutSessionId, txHash),
 
     /**
      * Create a hosted checkout that funds and spends the authenticated buyer's
@@ -916,7 +928,51 @@ export class Soledgic {
     listRefunds: (req?: ListRefundsRequest) => this.listRefunds(req),
   }
 
-  private throwTypedError(message: string, status: number, data: unknown): never {
+  private retryAfterSeconds(response?: Response): number | undefined {
+    const raw = response?.headers?.get('retry-after')
+      || response?.headers?.get('Retry-After')
+    if (!raw) return undefined
+
+    const numeric = Number(raw)
+    if (Number.isFinite(numeric) && numeric >= 0) return Math.ceil(numeric)
+
+    const retryAt = Date.parse(raw)
+    if (!Number.isFinite(retryAt)) return undefined
+    return Math.max(0, Math.ceil((retryAt - Date.now()) / 1000))
+  }
+
+  private async parseResponseData(response: Response): Promise<any> {
+    const text = await response.text()
+    if (!text.trim()) {
+      // Some fetch adapters and test doubles expose JSON independently of
+      // text(). Native Response objects will reject here once the body has
+      // been consumed, which correctly falls back to an empty payload.
+      try {
+        const parsed = await response.json()
+        return parsed && typeof parsed === 'object'
+          ? parsed
+          : { value: parsed }
+      } catch {
+        return {}
+      }
+    }
+
+    try {
+      const parsed = JSON.parse(text)
+      return parsed && typeof parsed === 'object'
+        ? parsed
+        : { value: parsed }
+    } catch {
+      return { error: text.slice(0, 4_096) }
+    }
+  }
+
+  private throwTypedError(
+    message: string,
+    status: number,
+    data: unknown,
+    response?: Response,
+  ): never {
     const apiCode =
       typeof (data as any)?.error_code === 'string'
         ? (data as any).error_code
@@ -929,6 +985,12 @@ export class Soledgic {
       case 401: throw new AuthenticationError(message, data, apiCode)
       case 404: throw new NotFoundError(message, data, apiCode)
       case 409: throw new ConflictError(message, data, apiCode)
+      case 429: throw new RateLimitError(
+        message,
+        this.retryAfterSeconds(response),
+        data,
+        apiCode || 'RATE_LIMITED',
+      )
       default:  throw new SoledgicError(message, status, data, apiCode)
     }
   }
@@ -952,14 +1014,16 @@ export class Soledgic {
         headers: this.requestHeaders('application/json'),
         body: JSON.stringify(body),
         signal: controller.signal,
+        redirect: 'error',
       })
 
-      const data = await response.json()
+      const data = await this.parseResponseData(response)
       if (!response.ok) {
         this.throwTypedError(
           data.error || `Request failed: ${response.status}`,
           response.status,
           data,
+          response,
         )
       }
       return data
@@ -982,13 +1046,15 @@ export class Soledgic {
         method: 'GET',
         headers: this.requestHeaders(),
         signal: controller.signal,
+        redirect: 'error',
       })
-      const data = await response.json()
+      const data = await this.parseResponseData(response)
       if (!response.ok) {
         this.throwTypedError(
           data.error || `Request failed: ${response.status}`,
           response.status,
           data,
+          response,
         )
       }
       return data
@@ -1006,15 +1072,15 @@ export class Soledgic {
         headers: this.requestHeaders('application/json'),
         body: JSON.stringify(body),
         signal: controller.signal,
+        redirect: 'error',
       })
       if (!response.ok) {
-        const text = await response.text()
-        let parsed: any
-        try { parsed = JSON.parse(text) } catch { parsed = { error: text } }
+        const parsed = await this.parseResponseData(response)
         this.throwTypedError(
           parsed.error || `Request failed: ${response.status}`,
           response.status,
           parsed,
+          response,
         )
       }
       return response
@@ -1070,15 +1136,15 @@ export class Soledgic {
         method: 'GET',
         headers: this.requestHeaders(),
         signal: controller.signal,
+        redirect: 'error',
       })
       if (!response.ok) {
-        const text = await response.text()
-        let parsed: any
-        try { parsed = JSON.parse(text) } catch { parsed = { error: text } }
+        const parsed = await this.parseResponseData(response)
         this.throwTypedError(
           parsed.error || `Request failed: ${response.status}`,
           response.status,
           parsed,
+          response,
         )
       }
       return response
@@ -1095,13 +1161,15 @@ export class Soledgic {
         method: 'DELETE',
         headers: this.requestHeaders(),
         signal: controller.signal,
+        redirect: 'error',
       })
-      const data = await response.json()
+      const data = await this.parseResponseData(response)
       if (!response.ok) {
         this.throwTypedError(
           data.error || `Request failed: ${response.status}`,
           response.status,
           data,
+          response,
         )
       }
       return data
@@ -2963,6 +3031,9 @@ export class Soledgic {
   ): Promise<CheckoutSessionResourceResponse> {
     const paymentMethodId = 'paymentMethodId' in req ? req.paymentMethodId : undefined
     const buyerUserId = typeof req.buyerUserId === 'string' ? req.buyerUserId.trim() : ''
+    if (req.paymentRail === 'usdc' && (paymentMethodId || req.purchaseMode || req.holdFunds)) {
+      throw new Error('USDC checkout cannot use paymentMethodId, purchaseMode, or holdFunds')
+    }
     if (req.purchaseMode === 'direct_funded_wallet' && !buyerUserId) {
       throw new Error('buyerUserId is required for direct_funded_wallet checkout')
     }
@@ -2990,6 +3061,7 @@ export class Soledgic {
       purchase_mode: req.purchaseMode,
       hold_funds: req.holdFunds === true ? true : undefined,
       sandbox_checkout_provider: req.sandboxCheckoutProvider,
+      payment_rail: req.paymentRail,
       payment_method_id: paymentMethodId,
       success_url: req.successUrl,
       cancel_url: req.cancelUrl,
@@ -3031,7 +3103,52 @@ export class Soledgic {
               creatorPercent: checkoutSession.breakdown.creator_percent,
             }
           : null,
+        chain: checkoutSession.chain
+          ? {
+              chainId: Number(checkoutSession.chain.chain_id),
+              token: checkoutSession.chain.token ?? 'USDC',
+              tokenAddress: checkoutSession.chain.token_address,
+              routerAddress: checkoutSession.chain.router_address,
+              checkoutReference: checkoutSession.chain.checkout_reference,
+              grossUnits: String(checkoutSession.chain.gross_units),
+              transactionData: checkoutSession.chain.transaction_data,
+              paymentUri: checkoutSession.chain.payment_uri ?? null,
+              txHash: checkoutSession.chain.tx_hash ?? null,
+              settlementTransactionId: checkoutSession.chain.settlement_transaction_id ?? null,
+              status: checkoutSession.chain.status,
+            }
+          : null,
       },
+    }
+  }
+
+  /**
+   * Submit a Base transaction hash for an existing USDC checkout. The method
+   * returns `pending_finality` until the transaction is in a finalized block;
+   * retrying the same hash is idempotent.
+   */
+  async claimCheckoutSessionPayment(
+    checkoutSessionId: string,
+    txHash: string,
+  ): Promise<ClaimCheckoutSessionPaymentResponse> {
+    if (!checkoutSessionId.trim()) throw new Error('checkoutSessionId is required')
+    if (!/^0x[0-9a-fA-F]{64}$/.test(txHash.trim())) {
+      throw new Error('txHash must be a 32-byte transaction hash')
+    }
+    const response = await this.request<any>(
+      `checkout-sessions/${encodeURIComponent(checkoutSessionId)}/claim`,
+      { tx_hash: txHash.trim() },
+    )
+    return {
+      success: Boolean(response.success),
+      status: response.status,
+      checkoutSessionId: response.checkout_session_id ?? checkoutSessionId,
+      txHash: response.tx_hash ?? txHash.trim(),
+      blockNumber: response.block_number ?? null,
+      finalizedBlockNumber: response.finalized_block_number ?? null,
+      saleTransactionId: response.sale_transaction_id ?? null,
+      settlementTransactionId: response.settlement_transaction_id ?? null,
+      alreadyExists: Boolean(response.already_exists),
     }
   }
 
@@ -3566,8 +3683,6 @@ export class Soledgic {
     const id = req.refundRequestId
     const response = await this.request<any>(`refund-requests/${encodeURIComponent(id)}/approve`, {
       reason: req.reason,
-      reviewed_by_user_id: req.reviewedByUserId,
-      reviewed_by_actor: req.reviewedByActor,
       metadata: req.metadata,
     })
 
@@ -3578,8 +3693,6 @@ export class Soledgic {
     const id = req.refundRequestId
     const response = await this.request<any>(`refund-requests/${encodeURIComponent(id)}/reject`, {
       reason: req.reason,
-      reviewed_by_user_id: req.reviewedByUserId,
-      reviewed_by_actor: req.reviewedByActor,
       metadata: req.metadata,
     })
 
@@ -3590,8 +3703,6 @@ export class Soledgic {
     const id = req.refundRequestId
     const response = await this.request<any>(`refund-requests/${encodeURIComponent(id)}/cancel`, {
       reason: req.reason,
-      reviewed_by_user_id: req.reviewedByUserId,
-      reviewed_by_actor: req.reviewedByActor,
       metadata: req.metadata,
     })
 
